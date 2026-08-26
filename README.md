@@ -225,7 +225,9 @@ cargo run -p fixtrace-tui -- --session <session-id>
 
 TUI 通过 App Service 执行真实 Session/Agent/Trial/Cancel 工作流，支持流式 timeline、响应式 Sidebar/Inspector、多行输入、Slash Commands 和安全终端恢复。使用方式见 [TUI 文档](docs/tui.md)。
 
-![FixTrace TUI 宽布局（由 Ratatui TestBackend 快照生成）](docs/screenshots/tui-wide.png)
+![FixTrace TUI 主界面（由 Ratatui TestBackend 快照生成）](docs/screenshots/tui-main.png)
+
+![FixTrace TUI 结构化审批（由受测 Approval 快照生成）](docs/screenshots/tui-approval.png)
 
 ## Desktop GUI
 
@@ -245,9 +247,15 @@ npm run tauri -- build
 
 macOS 输出为 `target/release/bundle/macos/FixTrace.app`。桌面端支持真实 Session 新建/恢复、Streaming、Tool/Trial、Approval/Cancel、Actions、Graph、Diff、Artifact、Usage、设置、原生文件对话框和快捷键；详见 [Desktop 文档](docs/desktop.md)。
 
+当前仓库默认生成 ad-hoc 签名的本机开发包；公开分发还需要 Apple Developer ID、notarization 和 stapling。已执行的干净源码打包、原生 smoke test、SHA-256 与签名限制见 [U9 发布验证](docs/u9-release-verification.md)。
+
 ![FixTrace Desktop 审批弹窗（显式 Mock 截图）](docs/screenshots/desktop-approval-mock.png)
 
 审批截图顶部持续显示 `MOCK DATA`，用于可重复的 UI 展示与 E2E；生产构建不会在原生调用失败后静默回退到 Mock。
+
+![FixTrace Desktop 依赖图（显式 Mock 截图）](docs/screenshots/gui-graph.png)
+
+![FixTrace Desktop Diff（显式 Mock 截图）](docs/screenshots/gui-diff.png)
 
 ## 测试与质量检查
 
@@ -278,16 +286,30 @@ npm run build
 - Linux/macOS 是优先平台；Windows 权限和进程组语义未完整支持。
 - 不支持 SSH、apt/systemd/内核修改、GUI 录制、Docker 强依赖、strace/eBPF 或不可撤销外部 API。
 
+## 常见问题
+
+- `/models` 返回 400 或出现 `request failed: builder error`：先检查 endpoint 和 API Key 环境变量的首尾空白；不要把密钥值写入配置。
+- App Server/GUI 报 writer lock：同一状态目录只能有一个权威写者，关闭重复 InProcess 客户端或连接已有 WebSocket server。
+- TUI 所在 PTY 不支持 cursor-position query：换用常规 Terminal.app、iTerm2 或 Kitty；初始化失败时 `TerminalGuard` 会先恢复终端。
+- GUI 顶部显示 `MOCK DATA`：当前是显式 Mock 开发模式；真实桌面端请使用 `npm run tauri -- dev` 或打包后的 `.app`。
+- macOS 拒绝外部分发：默认 bundle 未做 Developer ID 签名/公证，详见 [排障指南](docs/troubleshooting.md)。
+
 ## 设计资料
 
 - [实施计划](docs/implementation-plan.md)
 - [设计文档](docs/design.md)
 - [系统架构](docs/architecture.md)
+- [UI 架构索引](docs/ui-architecture.md)
 - [App Server](docs/app-server.md)
 - [TUI](docs/tui.md)
 - [Desktop GUI](docs/desktop.md)
+- [快捷键](docs/keybindings.md)
 - [UI 协议](docs/protocol.md)
+- [安全模型](docs/security.md)
 - [U8 稳健性与安全审计](docs/u8-hardening.md)
+- [课堂演示脚本](docs/demo-script.md)
+- [U9 发布验证](docs/u9-release-verification.md)
+- [常见问题](docs/troubleshooting.md)
 - [课程要求映射](docs/requirements-matrix.md)
 - [AI 开发开销空白模板](docs/development-cost-template.csv)
 

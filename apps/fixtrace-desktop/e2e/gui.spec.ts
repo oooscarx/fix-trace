@@ -38,6 +38,16 @@ test("complete desktop mock workflow", async ({ page }) => {
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByText("Task cancelled")).toBeVisible();
   await capture(page, "desktop-overview-mock.png");
+  await capture(page, "gui-main.png");
+
+  await page.getByRole("tab", { name: "Graph" }).click();
+  await expect(page.getByRole("img", { name: "Dependency graph" })).toBeVisible();
+  await capture(page, "gui-graph.png");
+  await page.getByRole("tab", { name: "Diff" }).click();
+  await expect(page.getByRole("combobox", { name: "Diff scope" })).toHaveValue(
+    "baseline-current",
+  );
+  await capture(page, "gui-diff.png");
 
   await page.getByRole("button", { name: /parser-repair/ }).click();
   await expect(page.getByRole("heading", { name: "parser-repair", level: 1 })).toBeVisible();

@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use fixtrace_protocol::*;
-use fixtrace_tui::{ConnectionMode, Effect, InspectorTab, Model, Theme, TuiEvent, render, update};
+use fixtrace_tui::{
+    ConnectionMode, Effect, InspectorTab, Modal, Model, Theme, TuiEvent, render, update,
+};
 use ratatui::{Terminal, backend::TestBackend};
 use uuid::Uuid;
 
@@ -27,6 +29,54 @@ fn too_small_terminal_snapshot() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &model)).unwrap();
     insta::assert_snapshot!(buffer_text(terminal.backend(), 52, 12));
+}
+
+#[test]
+fn approval_modal_snapshot() {
+    let mut model = fixture_model();
+    let session_id = model.selected_session_id.unwrap();
+    let task_id = model.active_task().unwrap().id;
+    let approval_id = uuid("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    model
+        .session
+        .as_mut()
+        .unwrap()
+        .approvals
+        .push(ApprovalView {
+            request: ApprovalRequest {
+                id: approval_id,
+                session_id,
+                task_id,
+                kind: ApprovalKind::ReplayCommand,
+                title: "Run recorded Oracle command".to_owned(),
+                reason: "This opaque recorded command requires an explicit decision.".to_owned(),
+                risk: RiskLevel::Medium,
+                command_preview: Some("cargo test --test acceptance".to_owned()),
+                cwd: Some(".".into()),
+                affected_paths: vec!["target/test-output.log".into()],
+                action_ids: vec![5, 6],
+                accesses_network: false,
+                sandbox_path: Some("/tmp/fixtrace/trial-018".into()),
+                requested_scope: ApprovalScope::Once,
+                choices: vec![
+                    ApprovalChoice::ApproveOnce,
+                    ApprovalChoice::ApproveForTask,
+                    ApprovalChoice::ApproveEquivalentForSession,
+                    ApprovalChoice::Deny,
+                    ApprovalChoice::CancelTask,
+                ],
+                created_at: timestamp(),
+            },
+            status: ApprovalStatus::Pending,
+            resolution: None,
+            can_approve: true,
+        });
+    model.modal = Some(Modal::Approval(approval_id));
+
+    let backend = TestBackend::new(140, 38);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    insta::assert_snapshot!(buffer_text(terminal.backend(), 140, 38));
 }
 
 #[test]

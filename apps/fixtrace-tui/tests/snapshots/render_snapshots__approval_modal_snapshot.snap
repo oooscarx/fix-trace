@@ -1,0 +1,42 @@
+---
+source: apps/fixtrace-tui/tests/render_snapshots.rs
+expression: "buffer_text(terminal.backend(), 140, 38)"
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│FixTrace  parser-repair  glm-5 · medium · AskForOpaque · task Running · 1558 tok · $0.0032 · 16% · in-process · online                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Sessions ────────────┐┌ Transcript ────────────────────────────────────────────────────────────────┐┌ Inspector ─────────────────────────┐
+│▶ parser-repair • runn││ YOU  Completed                                                             ││ Overview · Actions · Trials · Graph│
+│  Analyzing · 08┌ Approval required ─────────────────────────────────────────────────────────────────────────────────────┐────────────────┘
+│  cli-timeout   │Run recorded Oracle command                                                                             │────────────────┐
+│  ReadyForAnalys│Why       This opaque recorded command requires an explicit decision.                                   │epair           │
+│                │Risk      Medium                                                                                        │g               │
+│                │Scope     Once                                                                                          │                │
+│                │Command   cargo test --test acceptance                                                                  │                │
+│                │Cwd       .                                                                                             │rn · Running    │
+│                │Sandbox   /tmp/fixtrace/trial-018                                                                       │                │
+│                │Actions   [5, 6]                                                                                        │                │
+│                │Paths     ["target/test-output.log"]                                                                    │sufficient under│
+│                │Network   false                                                                                         │e and Oracle.   │
+│                │                                                                                                        │                │
+│                │y once · t task · s equivalent/session · n deny · c cancel task                                         │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+│                │                                                                                                        │                │
+└────────────────│                                                                                                        │────────────────┘
+┌ Message · Enter└────────────────────────────────────────────────────────────────────────────────────────────────────────┘────────────────┐
+│ Ask FixTrace about the verified repair trace, or type /                                                                                  │
+│                                                                                                                                          │
+│                                                                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ CONNECTED Oracle attempt 2/3  ·  Ctrl+P commands  Tab inspector  Ctrl+C cancel/exit  ? help
