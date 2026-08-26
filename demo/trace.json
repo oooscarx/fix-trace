@@ -1,0 +1,110 @@
+{
+  "oracle": {
+    "command": "cargo test --test acceptance",
+    "timeout_ms": 120000
+  },
+  "repetitions": 3,
+  "actions": [
+    {
+      "id": 1,
+      "original_order": 1,
+      "cwd_before": "",
+      "kind": {
+        "type": "shell_command",
+        "command": "ls -la"
+      },
+      "replayable": true,
+      "note": "Inspect the project root"
+    },
+    {
+      "id": 2,
+      "original_order": 2,
+      "cwd_before": "",
+      "kind": {
+        "type": "shell_command",
+        "command": "cargo clean"
+      },
+      "replayable": true
+    },
+    {
+      "id": 3,
+      "original_order": 3,
+      "cwd_before": "",
+      "kind": {
+        "type": "set_environment",
+        "key": "RUST_LOG",
+        "value": "debug"
+      },
+      "replayable": true
+    },
+    {
+      "id": 4,
+      "original_order": 4,
+      "cwd_before": "",
+      "kind": {
+        "type": "shell_command",
+        "command": "cargo build"
+      },
+      "replayable": true
+    },
+    {
+      "id": 5,
+      "original_order": 5,
+      "cwd_before": "",
+      "kind": {
+        "type": "file_patch",
+        "files": [
+          {
+            "path": "config.toml",
+            "content": "[server]\nport = 8080\n",
+            "unix_mode": 420
+          }
+        ]
+      },
+      "replayable": true,
+      "note": "Set the expected server port"
+    },
+    {
+      "id": 6,
+      "original_order": 6,
+      "cwd_before": "",
+      "kind": {
+        "type": "shell_command",
+        "command": "chmod +x scripts/start.sh"
+      },
+      "replayable": true,
+      "note": "Make the start script executable"
+    },
+    {
+      "id": 7,
+      "original_order": 7,
+      "cwd_before": "",
+      "kind": {
+        "type": "shell_command",
+        "command": "cargo fmt"
+      },
+      "replayable": true
+    },
+    {
+      "id": 8,
+      "original_order": 8,
+      "cwd_before": "",
+      "kind": {
+        "type": "shell_command",
+        "command": "cargo build --release"
+      },
+      "replayable": true
+    },
+    {
+      "id": 9,
+      "original_order": 9,
+      "cwd_before": "",
+      "kind": {
+        "type": "shell_command",
+        "command": "cat config.toml"
+      },
+      "replayable": true
+    }
+  ]
+}
+

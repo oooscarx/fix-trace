@@ -1,11 +1,17 @@
 mod cli;
 mod config;
+mod demo;
+mod domain;
 mod error;
+mod replay;
+mod sandbox;
 
 use clap::Parser;
 use cli::{Cli, Command, ConfigCommand};
 use config::FixTraceConfig;
+use demo::run_demo;
 use error::AppError;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -24,8 +30,21 @@ async fn main() -> Result<(), AppError> {
             print!("{}", config.to_toml()?);
             Ok(())
         }
+        Command::Demo { no_llm } => {
+            let cancellation = CancellationToken::new();
+            install_ctrl_c_handler(cancellation.clone());
+            run_demo(no_llm, cancellation).await
+        }
         command => Err(AppError::NotImplemented(command.label().to_owned())),
     }
+}
+
+fn install_ctrl_c_handler(cancellation: CancellationToken) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancellation.cancel();
+        }
+    });
 }
 
 fn init_tracing(verbose: bool) {
