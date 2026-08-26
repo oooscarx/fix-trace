@@ -309,6 +309,7 @@ npm run build
 - [U8 稳健性与安全审计](docs/u8-hardening.md)
 - [课堂演示脚本](docs/demo-script.md)
 - [U9 发布验证](docs/u9-release-verification.md)
+- [UI v2 Definition of Done 最终审计](docs/ui-v2-dod-audit.md)
 - [常见问题](docs/troubleshooting.md)
 - [课程要求映射](docs/requirements-matrix.md)
 - [AI 开发开销空白模板](docs/development-cost-template.csv)
