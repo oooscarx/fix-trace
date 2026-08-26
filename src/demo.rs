@@ -5,8 +5,19 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    agent::{
+        diagnosis::Diagnosis,
+        loop_runner::{AgentHistory, AgentRunResult, run_agent},
+        tools::AnalysisTools,
+    },
+    config::FixTraceConfig,
     domain::{action::Action, trial::TrialOutcome},
     error::AppError,
+    llm::{
+        mock::MockProvider,
+        provider::{LlmResponse, ToolCall},
+        usage::{Usage, UsageObservation},
+    },
     minimize::engine::{AblationEvidence, minimize},
     replay::{oracle::OracleSpec, runner::TrialRunner},
 };
@@ -32,6 +43,8 @@ struct DemoReport {
     ablations: Vec<AblationEvidence>,
     trial_count: usize,
     statement: String,
+    diagnosis: Diagnosis,
+    agent: Option<AgentRunResult>,
 }
 
 pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(), AppError> {
@@ -64,11 +77,61 @@ pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(
         ));
     }
 
+    let offline_diagnosis = Diagnosis::offline(&report);
+    let (diagnosis, agent) = if no_llm {
+        (offline_diagnosis, None)
+    } else {
+        let provider = MockProvider::new([
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "demo-tool-1".to_owned(),
+                    name: "run_minimizer".to_owned(),
+                    arguments: serde_json::json!({}),
+                }],
+                usage: mock_usage(),
+                request_id: Some("mock-demo-1".to_owned()),
+                model: Some("fixtrace-mock".to_owned()),
+            },
+            LlmResponse {
+                content: Some(serde_json::to_string(&offline_diagnosis)?),
+                tool_calls: Vec::new(),
+                usage: mock_usage(),
+                request_id: Some("mock-demo-2".to_owned()),
+                model: Some("fixtrace-mock".to_owned()),
+            },
+        ]);
+        let mut tools = AnalysisTools::new(
+            &runner,
+            &trace.actions,
+            &report,
+            None,
+            None,
+            cancellation.clone(),
+        );
+        let run = run_agent(
+            &provider,
+            &mut tools,
+            &FixTraceConfig::default(),
+            cancellation,
+            None,
+            AgentHistory::none(),
+        )
+        .await?;
+        let diagnosis = run.diagnosis.clone().ok_or_else(|| {
+            AppError::DemoVerification(format!(
+                "MockProvider agent stopped without diagnosis: {:?}",
+                run.stop_reason
+            ))
+        })?;
+        (diagnosis, Some(run))
+    };
+
     let output = DemoReport {
         mode: if no_llm {
             "offline-no-llm"
         } else {
-            "deterministic-core-only"
+            "mock-provider"
         },
         baseline_hash: runner.baseline_hash().to_owned(),
         baseline_trial_id: report.empty_trial.id,
@@ -81,9 +144,20 @@ pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(
         ablations: report.ablations,
         trial_count: report.trials.len(),
         statement: report.statement,
+        diagnosis,
+        agent,
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+fn mock_usage() -> UsageObservation {
+    UsageObservation::Known {
+        usage: Usage {
+            input_tokens: 20,
+            output_tokens: 10,
+        },
+    }
 }
 
 fn load_demo_trace() -> Result<DemoTrace, AppError> {

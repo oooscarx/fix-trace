@@ -36,7 +36,12 @@ pub enum Command {
     /// Enter the controlled session REPL.
     Shell { session_id: String },
     /// Replay and minimize a completed session.
-    Analyze { session_id: String },
+    Analyze {
+        session_id: String,
+        /// Skip model calls and use the deterministic evidence report.
+        #[arg(long)]
+        no_llm: bool,
+    },
     /// Show a live or completed session.
     Show { session_id: String },
     /// List or inspect persisted sessions.

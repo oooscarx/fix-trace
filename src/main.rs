@@ -1,3 +1,4 @@
+mod agent;
 mod app;
 mod cli;
 mod config;
@@ -5,6 +6,7 @@ mod demo;
 mod domain;
 mod error;
 mod history;
+mod llm;
 mod minimize;
 mod progress;
 mod replay;

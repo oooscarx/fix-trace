@@ -68,6 +68,12 @@ pub enum AppError {
 
     #[error("history import rejected: {0}")]
     Import(String),
+
+    #[error("LLM provider error: {0}")]
+    Llm(String),
+
+    #[error("Agent stopped: {0}")]
+    Agent(String),
 }
 
 impl AppError {

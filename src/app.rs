@@ -3,6 +3,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    agent::{
+        diagnosis::Diagnosis,
+        loop_runner::{AgentHistory, run_agent},
+        tools::AnalysisTools,
+    },
     cli::{Cli, Command, ConfigCommand, HistoryCommand},
     config::FixTraceConfig,
     demo::run_demo,
@@ -12,9 +17,10 @@ use crate::{
         export::{export_session, import_session},
         paths::StatePaths,
     },
+    llm::openai_compatible::OpenAiCompatibleProvider,
     progress::{ProgressSender, renderer},
     recorder::repl,
-    workflow::{analyze_session, initialize_session},
+    workflow::{analyze_session, initialize_session, runner_for_session},
 };
 
 pub async fn run(cli: Cli, cancellation: CancellationToken) -> Result<(), AppError> {
@@ -77,12 +83,56 @@ async fn dispatch(
             let _renderer = renderer::spawn(receiver);
             repl::run(database, config, session_id, &cancellation, progress).await
         }
-        Command::Analyze { session_id } => {
+        Command::Analyze { session_id, no_llm } => {
             let session_id = parse_session_id(&session_id)?;
             let (progress, receiver) = ProgressSender::channel(1024);
             let _renderer = renderer::spawn(receiver);
-            let report =
-                analyze_session(database, config, session_id, &cancellation, progress).await?;
+            let report = analyze_session(
+                database,
+                config,
+                session_id,
+                &cancellation,
+                progress.clone(),
+            )
+            .await?;
+            let mut diagnosis = Diagnosis::offline(&report);
+            let mut agent = None;
+            if !no_llm && std::env::var_os(&config.model.api_key_env).is_some() {
+                let session = database.load_session(session_id)?;
+                let actions = database.load_actions(session_id)?;
+                let runner = runner_for_session(&session, config, progress.clone())?;
+                let provider = OpenAiCompatibleProvider::from_config(&config.model)?;
+                let mut tools = AnalysisTools::new(
+                    &runner,
+                    &actions,
+                    &report,
+                    Some(database),
+                    Some(session_id),
+                    cancellation.clone(),
+                );
+                let result = run_agent(
+                    &provider,
+                    &mut tools,
+                    config,
+                    cancellation.clone(),
+                    Some(&progress),
+                    AgentHistory {
+                        database: Some(database),
+                        session_id: Some(session_id),
+                    },
+                )
+                .await?;
+                if let Some(model_diagnosis) = &result.diagnosis {
+                    diagnosis = model_diagnosis.clone();
+                }
+                agent = Some(result);
+            } else {
+                database.insert_json(
+                    "diagnoses",
+                    Some(session_id),
+                    &serde_json::to_value(&diagnosis)?,
+                )?;
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
@@ -93,6 +143,9 @@ async fn dispatch(
                     "final_outcome": report.final_trial.outcome,
                     "ablations": report.ablations,
                     "statement": report.statement,
+                    "diagnosis": diagnosis,
+                    "agent": agent,
+                    "llm_mode": if agent.is_some() { "configured-provider" } else { "offline-no-llm" },
                 }))?
             );
             Ok(())
