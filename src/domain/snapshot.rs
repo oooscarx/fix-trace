@@ -111,6 +111,18 @@ impl SnapshotManifest {
             permission_modified,
         }
     }
+
+    pub fn has_same_content(&self, other: &Self) -> bool {
+        self.files.len() == other.files.len()
+            && self.files.iter().all(|(path, state)| {
+                other.files.get(path).is_some_and(|candidate| {
+                    state.file_type == candidate.file_type
+                        && state.sha256 == candidate.sha256
+                        && state.size == candidate.size
+                        && state.symlink_target == candidate.symlink_target
+                })
+            })
+    }
 }
 
 pub(crate) fn is_excluded_relative(path: &Path, include_target: bool) -> bool {

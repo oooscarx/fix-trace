@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     domain::{
-        action::{Action, ActionKind, ActionResult, FileReplacement},
+        action::{Action, ActionKind, ActionResult, ArtifactRef, FileReplacement},
         snapshot::SnapshotManifest,
     },
     error::AppError,
@@ -28,6 +28,10 @@ pub struct ProcessEvidence {
     pub duration_ms: u64,
     pub stdout: String,
     pub stderr: String,
+    #[serde(default)]
+    pub stdout_artifact: Option<ArtifactRef>,
+    #[serde(default)]
+    pub stderr_artifact: Option<ArtifactRef>,
     pub timed_out: bool,
     pub cancelled: bool,
 }
@@ -66,6 +70,40 @@ impl ReplayState {
 
     pub fn environment(&self) -> &BTreeMap<String, Option<String>> {
         &self.environment
+    }
+
+    pub fn restore_context(
+        root: PathBuf,
+        include_target: bool,
+        actions: &[Action],
+    ) -> Result<Self, AppError> {
+        let mut state = Self::new(root, include_target);
+        let mut ordered: Vec<_> = actions.iter().collect();
+        ordered.sort_by_key(|action| action.original_order);
+        for action in ordered {
+            match &action.kind {
+                ActionKind::SetEnvironment { key, value } => {
+                    validate_environment_key(key)?;
+                    state.environment.insert(key.clone(), Some(value.clone()));
+                }
+                ActionKind::UnsetEnvironment { key } => {
+                    validate_environment_key(key)?;
+                    state.environment.insert(key.clone(), None);
+                }
+                ActionKind::ChangeDirectory { path } => {
+                    let directory = safe_existing_path(&state.root, path)?;
+                    if !directory.is_dir() {
+                        return Err(AppError::UnsafePath {
+                            path: path.clone(),
+                            reason: "recorded working directory is not a directory".to_owned(),
+                        });
+                    }
+                    state.cwd = path.clone();
+                }
+                ActionKind::ShellCommand { .. } | ActionKind::FilePatch { .. } => {}
+            }
+        }
+        Ok(state)
     }
 }
 
@@ -143,6 +181,8 @@ pub async fn replay_action(
         duration_ms: process.duration_ms,
         stdout: process.stdout,
         stderr: process.stderr,
+        stdout_artifact: process.stdout_artifact,
+        stderr_artifact: process.stderr_artifact,
         timed_out: process.timed_out,
         cancelled: process.cancelled,
         before_snapshot_hash: before.root_hash.clone(),
@@ -221,6 +261,8 @@ pub async fn run_shell_command(
         duration_ms: elapsed_ms(started.elapsed()),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout_artifact: None,
+        stderr_artifact: None,
         timed_out,
         cancelled,
     })
@@ -272,6 +314,8 @@ fn successful_internal_action(duration: Duration) -> ProcessEvidence {
         duration_ms: elapsed_ms(duration),
         stdout: String::new(),
         stderr: String::new(),
+        stdout_artifact: None,
+        stderr_artifact: None,
         timed_out: false,
         cancelled: false,
     }
@@ -283,6 +327,8 @@ fn cancelled_action_result(snapshot_hash: String) -> ActionResult {
         duration_ms: 0,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_artifact: None,
+        stderr_artifact: None,
         timed_out: false,
         cancelled: true,
         before_snapshot_hash: snapshot_hash.clone(),

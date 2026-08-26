@@ -14,6 +14,14 @@ pub struct FixTraceConfig {
 }
 
 impl FixTraceConfig {
+    pub fn load_or_default(path: &Path) -> Result<Self, AppError> {
+        if path.exists() {
+            Self::load(path)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self, AppError> {
         let source = fs::read_to_string(path).map_err(|source| AppError::ReadConfig {
             path: path.to_path_buf(),
@@ -26,6 +34,55 @@ impl FixTraceConfig {
 
     pub fn to_toml(&self) -> Result<String, AppError> {
         Ok(toml::to_string_pretty(self)?)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), AppError> {
+        self.validate()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|source| AppError::io("create configuration directory", parent, source))?;
+        }
+        fs::write(path, self.to_toml()?)
+            .map_err(|source| AppError::io("write configuration", path, source))
+    }
+
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), AppError> {
+        match key {
+            "model.provider" => self.model.provider = value.to_owned(),
+            "model.endpoint" => self.model.endpoint = value.to_owned(),
+            "model.api_key_env" => self.model.api_key_env = value.to_owned(),
+            "model.model" => self.model.model = value.to_owned(),
+            "model.api_style" => self.model.api_style = value.to_owned(),
+            "model.context_length" => self.model.context_length = parse_value(key, value)?,
+            "model.reasoning_mode" => self.model.reasoning_mode = value.to_owned(),
+            "model.max_agent_steps" => self.model.max_agent_steps = parse_value(key, value)?,
+            "pricing.input_per_million_usd" => {
+                self.pricing.input_per_million_usd = parse_value(key, value)?;
+            }
+            "pricing.output_per_million_usd" => {
+                self.pricing.output_per_million_usd = parse_value(key, value)?;
+            }
+            "budget.max_total_tokens" => {
+                self.budget.max_total_tokens = parse_value(key, value)?;
+            }
+            "budget.max_cost_usd" => self.budget.max_cost_usd = parse_value(key, value)?,
+            "replay.repetitions" => self.replay.repetitions = parse_value(key, value)?,
+            "replay.oracle_timeout_secs" => {
+                self.replay.oracle_timeout_secs = parse_value(key, value)?;
+            }
+            "replay.include_target" => self.replay.include_target = parse_value(key, value)?,
+            "model.api_key" => {
+                return Err(AppError::InvalidConfig(
+                    "API keys must not be stored; set model.api_key_env instead".to_owned(),
+                ));
+            }
+            _ => {
+                return Err(AppError::InvalidConfig(format!(
+                    "unknown configuration key `{key}`"
+                )));
+            }
+        }
+        self.validate()
     }
 
     fn validate(&self) -> Result<(), AppError> {
@@ -68,6 +125,16 @@ impl FixTraceConfig {
         }
         Ok(())
     }
+}
+
+fn parse_value<T>(key: &str, value: &str) -> Result<T, AppError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|error| AppError::InvalidConfig(format!("invalid value for `{key}`: {error}")))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

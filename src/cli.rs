@@ -13,6 +13,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    /// Store sessions and history under this directory.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub state_dir: Option<PathBuf>,
+
     /// Enable verbose diagnostic logs.
     #[arg(short, long, global = true)]
     pub verbose: bool,
@@ -59,22 +63,6 @@ pub enum Command {
         #[arg(long)]
         no_llm: bool,
     },
-}
-
-impl Command {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Init { .. } => "init",
-            Self::Shell { .. } => "shell",
-            Self::Analyze { .. } => "analyze",
-            Self::Show { .. } => "show",
-            Self::History { .. } => "history",
-            Self::Export { .. } => "export",
-            Self::Import { .. } => "import",
-            Self::Config { .. } => "config set",
-            Self::Demo { .. } => "demo",
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]

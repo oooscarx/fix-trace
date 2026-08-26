@@ -1,16 +1,18 @@
+mod app;
 mod cli;
 mod config;
 mod demo;
 mod domain;
 mod error;
+mod history;
 mod minimize;
+mod progress;
 mod replay;
 mod sandbox;
+mod workflow;
 
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand};
-use config::FixTraceConfig;
-use demo::run_demo;
+use cli::Cli;
 use error::AppError;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -20,24 +22,9 @@ async fn main() -> Result<(), AppError> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
-    match cli.command {
-        Command::Config {
-            command: ConfigCommand::Show,
-        } => {
-            let config = match cli.config {
-                Some(path) => FixTraceConfig::load(&path)?,
-                None => FixTraceConfig::default(),
-            };
-            print!("{}", config.to_toml()?);
-            Ok(())
-        }
-        Command::Demo { no_llm } => {
-            let cancellation = CancellationToken::new();
-            install_ctrl_c_handler(cancellation.clone());
-            run_demo(no_llm, cancellation).await
-        }
-        command => Err(AppError::NotImplemented(command.label().to_owned())),
-    }
+    let cancellation = CancellationToken::new();
+    install_ctrl_c_handler(cancellation.clone());
+    app::run(cli, cancellation).await
 }
 
 fn install_ctrl_c_handler(cancellation: CancellationToken) {
@@ -61,3 +48,4 @@ fn init_tracing(verbose: bool) {
         .without_time()
         .init();
 }
+mod recorder;

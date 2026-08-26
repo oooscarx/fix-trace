@@ -12,6 +12,7 @@ use crate::{
         trial::{Trial, TrialOutcome},
     },
     error::AppError,
+    progress::ProgressEvent,
     replay::runner::TrialRunner,
 };
 
@@ -78,6 +79,12 @@ pub async fn minimize_with_graph(
                 continue;
             }
             if context.evaluate(&candidate).await?.outcome == TrialOutcome::StablePass {
+                context
+                    .runner
+                    .emit_progress(ProgressEvent::CandidateReduced {
+                        before: minimal.len(),
+                        after: candidate.len(),
+                    });
                 minimal = candidate;
                 reduced = true;
                 break;

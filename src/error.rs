@@ -26,6 +26,9 @@ pub enum AppError {
     #[error("failed to parse JSON: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("history database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
     #[error("failed to walk project tree: {0}")]
     WalkDirectory(#[from] walkdir::Error),
 
@@ -57,8 +60,14 @@ pub enum AppError {
     #[error("minimization failed: {0}")]
     Minimization(String),
 
-    #[error("the `{0}` command is planned but not implemented in this milestone")]
-    NotImplemented(String),
+    #[error("session {0} was not found")]
+    SessionNotFound(String),
+
+    #[error("baseline Oracle must be StableFail before recording; observed {0}")]
+    BaselineOracle(String),
+
+    #[error("history import rejected: {0}")]
+    Import(String),
 }
 
 impl AppError {

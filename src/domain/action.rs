@@ -44,11 +44,22 @@ pub struct ActionResult {
     pub duration_ms: u64,
     pub stdout: String,
     pub stderr: String,
+    #[serde(default)]
+    pub stdout_artifact: Option<ArtifactRef>,
+    #[serde(default)]
+    pub stderr_artifact: Option<ArtifactRef>,
     pub timed_out: bool,
     pub cancelled: bool,
     pub before_snapshot_hash: String,
     pub after_snapshot_hash: String,
     pub delta: SnapshotDelta,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactRef {
+    pub path: PathBuf,
+    pub size: u64,
+    pub sha256: String,
 }
 
 const fn default_replayable() -> bool {

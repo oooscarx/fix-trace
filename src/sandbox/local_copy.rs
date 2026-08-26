@@ -5,6 +5,7 @@ use std::{
 
 use walkdir::WalkDir;
 
+use crate::domain::snapshot::{FileType, SnapshotManifest};
 use crate::{domain::snapshot::is_excluded_relative, error::AppError};
 
 pub fn copy_project(
@@ -141,6 +142,80 @@ pub fn safe_write_path(root: &Path, relative: &Path) -> Result<PathBuf, AppError
     Ok(root.join(relative))
 }
 
+pub fn normalize_project_path(current: &Path, requested: &Path) -> Result<PathBuf, AppError> {
+    let combined = if requested.is_absolute() {
+        return Err(AppError::UnsafePath {
+            path: requested.to_path_buf(),
+            reason: "absolute paths are outside the project-relative session model".to_owned(),
+        });
+    } else {
+        current.join(requested)
+    };
+    let mut normalized = PathBuf::new();
+    for component in combined.components() {
+        match component {
+            Component::Normal(segment) => normalized.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(AppError::UnsafePath {
+                        path: requested.to_path_buf(),
+                        reason: "path escapes the project root".to_owned(),
+                    });
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(AppError::UnsafePath {
+                    path: requested.to_path_buf(),
+                    reason: "path must remain project-relative".to_owned(),
+                });
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+pub fn protect_read_only(root: &Path) -> Result<(), AppError> {
+    let mut directories = Vec::new();
+    for entry in WalkDir::new(root).follow_links(false).into_iter() {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| AppError::io("read baseline metadata", entry.path(), error))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            directories.push((entry.path().to_path_buf(), metadata.permissions()));
+        } else {
+            set_read_only_permissions(entry.path(), metadata.permissions())?;
+        }
+    }
+    for (directory, permissions) in directories.into_iter().rev() {
+        set_read_only_permissions(&directory, permissions)?;
+    }
+    Ok(())
+}
+
+pub fn restore_manifest_permissions(
+    root: &Path,
+    manifest: &SnapshotManifest,
+) -> Result<(), AppError> {
+    let mut directories = Vec::new();
+    for state in manifest.files.values() {
+        let path = safe_write_path(root, &state.path)?;
+        if state.file_type == FileType::Directory {
+            directories.push((path, state.unix_mode));
+        } else if state.file_type == FileType::Regular {
+            set_recorded_permissions(&path, state.unix_mode)?;
+        }
+    }
+    for (path, mode) in directories.into_iter().rev() {
+        set_recorded_permissions(&path, mode)?;
+    }
+    ensure_root_writable(root)?;
+    Ok(())
+}
+
 fn validate_relative(relative: &Path) -> Result<(), AppError> {
     if relative.as_os_str().is_empty() {
         return Ok(());
@@ -157,6 +232,67 @@ fn validate_relative(relative: &Path) -> Result<(), AppError> {
         });
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_read_only_permissions(path: &Path, permissions: fs::Permissions) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = permissions.mode() & !0o222;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| AppError::io("protect baseline permissions", path, error))
+}
+
+#[cfg(not(unix))]
+fn set_read_only_permissions(
+    path: &Path,
+    mut permissions: fs::Permissions,
+) -> Result<(), AppError> {
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| AppError::io("protect baseline permissions", path, error))
+}
+
+#[cfg(unix)]
+fn set_recorded_permissions(path: &Path, mode: Option<u32>) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(mode) = mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|error| AppError::io("restore baseline permissions", path, error))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_recorded_permissions(path: &Path, _mode: Option<u32>) -> Result<(), AppError> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| AppError::io("read restored file permissions", path, error))?
+        .permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| AppError::io("restore baseline permissions", path, error))
+}
+
+#[cfg(unix)]
+fn ensure_root_writable(root: &Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(root)
+        .map_err(|error| AppError::io("read trial root permissions", root, error))?;
+    let mode = metadata.permissions().mode() | 0o700;
+    fs::set_permissions(root, fs::Permissions::from_mode(mode))
+        .map_err(|error| AppError::io("make trial root writable", root, error))
+}
+
+#[cfg(not(unix))]
+fn ensure_root_writable(root: &Path) -> Result<(), AppError> {
+    let mut permissions = fs::metadata(root)
+        .map_err(|error| AppError::io("read trial root permissions", root, error))?
+        .permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(root, permissions)
+        .map_err(|error| AppError::io("make trial root writable", root, error))
 }
 
 fn copy_safe_symlink(source: &Path, destination: &Path, root: &Path) -> Result<(), AppError> {
