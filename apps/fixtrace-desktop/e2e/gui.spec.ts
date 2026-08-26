@@ -1,4 +1,12 @@
 import { expect, test } from "@playwright/test";
+import path from "node:path";
+
+const screenshotDirectory = process.env.FIXTRACE_SCREENSHOT_DIR;
+
+async function capture(page: import("@playwright/test").Page, name: string) {
+  if (!screenshotDirectory) return;
+  await page.screenshot({ path: path.join(screenshotDirectory, name), fullPage: true });
+}
 
 test("complete desktop mock workflow", async ({ page }) => {
   await page.goto("/");
@@ -20,6 +28,7 @@ test("complete desktop mock workflow", async ({ page }) => {
 
   const approval = page.getByRole("dialog", { name: "Run recorded Oracle command" });
   await expect(approval).toBeVisible();
+  await capture(page, "desktop-approval-mock.png");
   await approval.getByRole("button", { name: "Approve once" }).click();
   await page.getByRole("button", { name: /run_candidate/ }).click();
   await expect(page.getByRole("code", { name: "" })).toContainText(
@@ -28,6 +37,7 @@ test("complete desktop mock workflow", async ({ page }) => {
   await expect(page.getByText("Verified trial")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByText("Task cancelled")).toBeVisible();
+  await capture(page, "desktop-overview-mock.png");
 
   await page.getByRole("button", { name: /parser-repair/ }).click();
   await expect(page.getByRole("heading", { name: "parser-repair", level: 1 })).toBeVisible();

@@ -8,3 +8,5 @@ apps/fixtrace-desktop/test-results/
 apps/fixtrace-desktop/playwright-report/
 apps/fixtrace-desktop/src-tauri/gen/
 *.tsbuildinfo
+__pycache__/
+*.pyc

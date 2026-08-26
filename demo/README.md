@@ -20,3 +20,20 @@ Run from the repository root:
 ```
 
 The default uses MockProvider. `./demo/run.sh --no-llm` skips the model loop entirely. Neither mode needs a network connection or API Key.
+
+For a classroom presentation, use the repository-level launcher:
+
+```bash
+./demo/presentation.sh cli
+./demo/presentation.sh tui
+./demo/presentation.sh desktop
+./demo/presentation.sh mock-gui
+```
+
+The TUI and desktop modes create a temporary real Session, record two repairs, verify and minimize them offline, and then launch the selected App Service client. `mock-gui` is deliberately labelled in the UI and exists only for a deterministic visual walkthrough.
+
+Rebuild the checked-in screenshots with:
+
+```bash
+./demo/capture_screenshots.sh
+```

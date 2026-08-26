@@ -22,6 +22,8 @@ npm run dev:mock
 
 打开 `http://127.0.0.1:1420/`。Mock 必须由 `VITE_FIXTRACE_MOCK=1` 显式启用；生产构建不会在原生调用失败后静默回退。页面顶部持续显示 `MOCK DATA`，固定事件流只用于组件测试、E2E 和截图，不会启动真实分析。
 
+课堂演示可从仓库根目录运行 `./demo/presentation.sh desktop`；脚本会在临时状态目录中准备并离线分析一个真实 Session，再打开 Tauri dev window。`./demo/presentation.sh mock-gui` 只用于固定视觉流程。
+
 ## 完整工作流
 
 桌面客户端通过类型化 Tauri commands 和 `Channel<EventEnvelope>` 支持：

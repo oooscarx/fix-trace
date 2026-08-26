@@ -8,6 +8,10 @@ FixTrace 的准确结论是：
 
 它不会声称找到了哲学意义上的真实根因、全局最小集合或唯一最小集合。
 
+![FixTrace Desktop 原生 macOS 窗口：真实 Session 与 Actions](docs/screenshots/desktop-native-actions-real.png)
+
+> 上图来自打包后的原生 Tauri App，读取的是离线准备、真实重放并最小化后的 Session。
+
 ## 主要能力
 
 - 为项目创建隔离、只读的基线和独立工作副本。
@@ -19,6 +23,9 @@ FixTrace 的准确结论是：
 - Agent 只能调用十个证据工具，不能执行模型生成的任意 Shell。
 - SQLite 历史、JSON 导入导出、Token/费用统计、预算停止和 Ctrl+C 取消。
 - 大于 64 KiB 的 stdout/stderr 自动保存为带 SHA-256 的 artifact，SQLite 只保留截断预览和索引。
+- 统一 Rust App Service、类型化 `fixtrace/1` 协议、持久化事件流和 InProcess/stdio/WebSocket transport。
+- Codex 风格全屏 TUI，以及 Tauri 2 + React 桌面 GUI；两端共享 SessionView、Approval、Cancel、Graph、Diff、Usage 和 Artifact。
+- 崩溃恢复、Gap/Snapshot 恢复、跨客户端审批 CAS、10,000 Item 虚拟化和 1 MiB Artifact 范围读取。
 
 ## 环境要求
 
@@ -26,6 +33,7 @@ FixTrace 的准确结论是：
 - macOS 或 Linux
 - 本地可运行的 Cargo 项目
 - 一个确定性的非交互式 Oracle 命令
+- 桌面端开发/打包需要 Node.js 22.12+ 与 npm
 
 构建：
 
@@ -63,6 +71,28 @@ Demo 会验证：
 6. 默认模式下 MockProvider 完成一次工具调用 Agent Loop，并输出带 action/trial 引用的 Diagnosis 和 Usage。
 
 也可以运行 [`demo/run.sh`](demo/run.sh)。
+
+课堂展示脚本提供四条明确路径：
+
+```bash
+./demo/presentation.sh cli       # 确定性离线核心，结论 [5, 6]
+./demo/presentation.sh tui       # 自动准备真实 Session 后打开 TUI
+./demo/presentation.sh desktop   # 自动准备真实 Session 后打开 Tauri dev window
+./demo/presentation.sh mock-gui  # 明确标记 MOCK DATA 的确定性 GUI 展示
+```
+
+`tui`/`desktop` 使用临时状态目录，退出后自动清理；可设置 `FIXTRACE_PRESENTATION_ROOT` 保留演示状态。所有模式都不需要 API Key。
+
+## 统一 App Service 架构
+
+```text
+CLI ─┐
+TUI ─┼─ AppClient ─ fixtrace/1 ─ FixTraceAppService ─ Core workflow
+GUI ─┘                       │                     ├─ SQLite/Event Store
+                             └─ typed event stream └─ Artifact/LLM/Sandbox
+```
+
+CLI、TUI 和 GUI 不各自实现 replay/minimize 业务逻辑。Rust 协议类型是唯一 schema 源头，桌面端 TypeScript 由 `ts-rs` 生成；Task、Approval 和 Event sequence 的权威状态在 App Service/SQLite。App Server 支持本地 stdio 与带 capability token 的 loopback WebSocket，多客户端使用相同 catch-up/live 语义。
 
 ## 实际项目流程
 
@@ -195,16 +225,47 @@ cargo run -p fixtrace-tui -- --session <session-id>
 
 TUI 通过 App Service 执行真实 Session/Agent/Trial/Cancel 工作流，支持流式 timeline、响应式 Sidebar/Inspector、多行输入、Slash Commands 和安全终端恢复。使用方式见 [TUI 文档](docs/tui.md)。
 
+![FixTrace TUI 宽布局（由 Ratatui TestBackend 快照生成）](docs/screenshots/tui-wide.png)
+
+## Desktop GUI
+
+安装依赖并运行真实 Tauri 窗口：
+
+```bash
+cd apps/fixtrace-desktop
+npm ci
+npm run tauri -- dev
+```
+
+生产打包：
+
+```bash
+npm run tauri -- build
+```
+
+macOS 输出为 `target/release/bundle/macos/FixTrace.app`。桌面端支持真实 Session 新建/恢复、Streaming、Tool/Trial、Approval/Cancel、Actions、Graph、Diff、Artifact、Usage、设置、原生文件对话框和快捷键；详见 [Desktop 文档](docs/desktop.md)。
+
+![FixTrace Desktop 审批弹窗（显式 Mock 截图）](docs/screenshots/desktop-approval-mock.png)
+
+审批截图顶部持续显示 `MOCK DATA`，用于可重复的 UI 展示与 E2E；生产构建不会在原生调用失败后静默回退到 Mock。
+
 ## 测试与质量检查
 
 ```bash
-cargo fmt --all --check
-cargo check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+
+cd apps/fixtrace-desktop
+npm run typecheck
+npm run lint
+npm test
+npm run e2e
+npm run build
 ```
 
-测试覆盖稳定 Snapshot、内容/权限差异、路径逃逸、环境重放、硬依赖闭包、ddmin、Flaky、cache key、费用公式、JSON 往返、取消、Mock Agent、历史记录以及完整 Demo。
+测试覆盖稳定 Snapshot、内容/权限差异、路径逃逸、环境重放、硬依赖闭包、ddmin、Flaky、cache key、费用公式、JSON 往返、取消、Mock Agent、历史记录、跨客户端恢复/审批、10k timeline、256 MiB Artifact range 以及完整 Demo。运行 `./demo/capture_screenshots.sh` 可重建 TestBackend 与显式 Mock 截图；原生截图需先运行 `./demo/presentation.sh desktop`。
 
 ## 安全边界与限制
 
@@ -224,7 +285,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 - [系统架构](docs/architecture.md)
 - [App Server](docs/app-server.md)
 - [TUI](docs/tui.md)
+- [Desktop GUI](docs/desktop.md)
 - [UI 协议](docs/protocol.md)
+- [U8 稳健性与安全审计](docs/u8-hardening.md)
 - [课程要求映射](docs/requirements-matrix.md)
 - [AI 开发开销空白模板](docs/development-cost-template.csv)
 

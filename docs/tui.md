@@ -12,6 +12,8 @@ cargo run -p fixtrace-tui -- --session <session-id>
 cargo run -p fixtrace-tui -- --state-dir /tmp/fixtrace-ui-test
 ```
 
+仓库根目录的 `./demo/presentation.sh tui` 会自动准备、验证并离线分析一个真实 Session，然后直接打开该 Session，适合课堂展示。
+
 连接已经启动的本地 App Server：
 
 ```bash
