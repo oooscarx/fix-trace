@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    agent::diagnosis::Diagnosis,
     domain::{action::Action, trial::Trial},
     error::AppError,
     history::database::HistoryDatabase,
@@ -18,6 +19,10 @@ use crate::{
 #[async_trait]
 pub trait AgentToolExecutor: Send {
     fn definitions(&self) -> Vec<ToolDefinition>;
+
+    fn validate_diagnosis(&self, _diagnosis: &Diagnosis) -> Result<(), AppError> {
+        Ok(())
+    }
 
     async fn execute(
         &mut self,
@@ -87,6 +92,29 @@ impl<'a> AnalysisTools<'a> {
 impl AgentToolExecutor for AnalysisTools<'_> {
     fn definitions(&self) -> Vec<ToolDefinition> {
         tool_definitions()
+    }
+
+    fn validate_diagnosis(&self, diagnosis: &Diagnosis) -> Result<(), AppError> {
+        for action_id in diagnosis.minimal_action_ids.iter().chain(
+            diagnosis
+                .evidence
+                .iter()
+                .flat_map(|claim| &claim.action_ids),
+        ) {
+            if !self.actions.contains_key(action_id) {
+                return Err(AppError::Agent(format!(
+                    "Diagnosis cites unknown action {action_id}"
+                )));
+            }
+        }
+        for trial_id in diagnosis.evidence.iter().flat_map(|claim| &claim.trial_ids) {
+            if !self.trials.contains_key(trial_id) {
+                return Err(AppError::Agent(format!(
+                    "Diagnosis cites unknown trial {trial_id}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     async fn execute(

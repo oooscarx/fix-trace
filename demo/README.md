@@ -12,3 +12,11 @@ cargo test --test acceptance
 ```
 
 The bundled nine-action trace repairs the fixture. Dependency-aware ddmin plus final per-action ablation reduces it to actions 5 and 6: the configuration replacement and `chmod` actions.
+
+Run from the repository root:
+
+```bash
+./demo/run.sh
+```
+
+The default uses MockProvider. `./demo/run.sh --no-llm` skips the model loop entirely. Neither mode needs a network connection or API Key.

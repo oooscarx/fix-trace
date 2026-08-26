@@ -340,6 +340,30 @@ fn cancelled_action_result(snapshot_hash: String) -> ActionResult {
 async fn terminate_child(
     child: &mut tokio::process::Child,
 ) -> Result<std::process::ExitStatus, AppError> {
+    #[cfg(unix)]
+    {
+        use nix::{
+            sys::signal::{Signal, killpg},
+            unistd::Pid,
+        };
+
+        if let Some(process_id) = child.id() {
+            let raw_id = i32::try_from(process_id)
+                .map_err(|_| AppError::Process("child process ID exceeds i32".to_owned()))?;
+            let process_group = Pid::from_raw(raw_id);
+            let _ignored = killpg(process_group, Signal::SIGTERM);
+            if let Ok(status) = tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                return status.map_err(|error| {
+                    AppError::Process(format!("could not reap terminated process group: {error}"))
+                });
+            }
+            let _ignored = killpg(process_group, Signal::SIGKILL);
+            return child.wait().await.map_err(|error| {
+                AppError::Process(format!("could not reap killed process group: {error}"))
+            });
+        }
+    }
+
     child.kill().await.map_err(|error| {
         AppError::Process(format!("could not terminate child process: {error}"))
     })?;
@@ -386,8 +410,11 @@ fn set_unix_mode(_path: &Path, _mode: Option<u32>) -> Result<(), AppError> {
 
 #[cfg(unix)]
 fn shell_command(command: &str) -> Command {
+    use std::os::unix::process::CommandExt;
+
     let mut process = Command::new("/bin/sh");
     process.arg("-c").arg(command);
+    process.as_std_mut().process_group(0);
     process
 }
 

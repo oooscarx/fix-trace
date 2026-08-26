@@ -179,6 +179,7 @@ where
             ))
         })?;
         diagnosis.validate()?;
+        tools.validate_diagnosis(&diagnosis)?;
         diagnosis.usage = usage.clone();
         history.record("diagnoses", &serde_json::to_value(&diagnosis)?)?;
         return Ok(AgentRunResult {

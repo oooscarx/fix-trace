@@ -72,3 +72,12 @@ MVP 支持本地 Rust/Cargo 项目、Linux/macOS、项目内文件与权限、�
 ## 提交策略
 
 每个里程碑在质量检查通过后形成独立提交；里程碑内若包含可独立验证的基础设施，会用更小的 Conventional Commit 提交。提交信息描述已经验证的事实，不把未完成能力写成完成状态。
+
+## 实施状态
+
+- M0：已完成并通过质量检查。
+- M1：已完成并通过完整 Demo 重放测试。
+- M2：已完成；Demo 得到 `{5, 6}` 并保存两项 StableFail 消融证据。
+- M3：已完成；受控 REPL、取消、SQLite、artifact、历史与导入导出可用。
+- M4：已完成；OpenAI-compatible/Mock Provider、受限 Agent Loop、Usage 与预算可用。
+- M5：已完成；README、设计、架构、课程映射、开销模板和离线演示已对齐实现。
