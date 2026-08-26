@@ -1,11 +1,16 @@
-use std::sync::Arc;
+use std::{
+    io::{Read, Write},
+    process::Command,
+    sync::Arc,
+};
 
 use crossterm::event::EventStream;
 use fixtrace_client::{AppClient, ClientError};
 use fixtrace_protocol::{
-    AppRequest, AppResponsePayload, ApprovalRespondRequest, MessageSendRequest, PageRequest,
-    SessionExportRequest, SessionListRequest, SessionSnapshotRequest, SubscribeRequest,
-    TaskIdRequest, TaskStartRequest,
+    AppRequest, AppResponsePayload, ApprovalRespondRequest, ConfigEntryUpdate, ConfigUpdateRequest,
+    MessageSendRequest, PageRequest, SessionCreateRequest, SessionExportRequest,
+    SessionForkRequest, SessionIdRequest, SessionImportRequest, SessionListRequest,
+    SessionSnapshotRequest, SubscribeRequest, TaskIdRequest, TaskStartRequest, TaskSteerRequest,
 };
 use futures_util::StreamExt;
 use tokio::{
@@ -26,7 +31,7 @@ pub async fn run(
     let size = terminal.terminal().size()?;
     model.viewport = (size.width, size.height);
     let (sender, mut receiver) = mpsc::channel::<TuiEvent>(2_048);
-    spawn_terminal_events(sender.clone());
+    let mut terminal_events = spawn_terminal_events(sender.clone());
     let mut subscription: Option<JoinHandle<()>> = None;
     let mut ticker = interval(Duration::from_millis(33));
     let mut effects = vec![Effect::LoadSessions];
@@ -46,7 +51,21 @@ pub async fn run(
             event = receiver.recv() => {
                 let Some(event) = event else { break };
                 let effects = update(&mut model, event);
-                schedule_effects(&client, &sender, &mut subscription, effects);
+                let mut scheduled = Vec::new();
+                for effect in effects {
+                    if let Effect::EditPrompt(text) = effect {
+                        terminal_events.abort();
+                        let _ = (&mut terminal_events).await;
+                        terminal.suspend()?;
+                        let result = edit_prompt(text).await;
+                        terminal.resume()?;
+                        terminal_events = spawn_terminal_events(sender.clone());
+                        scheduled.extend(update(&mut model, TuiEvent::EffectCompleted(result)));
+                    } else {
+                        scheduled.push(effect);
+                    }
+                }
+                schedule_effects(&client, &sender, &mut subscription, scheduled);
             }
         }
     }
@@ -56,7 +75,7 @@ pub async fn run(
     Ok(())
 }
 
-fn spawn_terminal_events(sender: mpsc::Sender<TuiEvent>) {
+fn spawn_terminal_events(sender: mpsc::Sender<TuiEvent>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut events = EventStream::new();
         while let Some(event) = events.next().await {
@@ -72,7 +91,7 @@ fn spawn_terminal_events(sender: mpsc::Sender<TuiEvent>) {
                 }
             }
         }
-    });
+    })
 }
 
 fn schedule_effects(
@@ -149,6 +168,7 @@ fn spawn_subscription(
 
 async fn execute_effect(client: Arc<dyn AppClient>, effect: Effect) -> EffectResult {
     let response = match effect {
+        Effect::EditPrompt(_) => unreachable!("editor effects are handled by the TUI runtime"),
         Effect::LoadSessions => {
             client
                 .request(AppRequest::SessionList(SessionListRequest {
@@ -158,6 +178,37 @@ async fn execute_effect(client: Arc<dyn AppClient>, effect: Effect) -> EffectRes
                     },
                     include_archived: true,
                 }))
+                .await
+        }
+        Effect::CreateSession {
+            project,
+            oracle,
+            title,
+        } => {
+            client
+                .request(AppRequest::SessionCreate(SessionCreateRequest {
+                    project,
+                    oracle,
+                    title,
+                }))
+                .await
+        }
+        Effect::ForkSession { session_id, title } => {
+            client
+                .request(AppRequest::SessionFork(SessionForkRequest {
+                    session_id,
+                    title,
+                }))
+                .await
+        }
+        Effect::ArchiveSession(session_id) => {
+            client
+                .request(AppRequest::SessionArchive(SessionIdRequest { session_id }))
+                .await
+        }
+        Effect::ImportSession(input) => {
+            client
+                .request(AppRequest::SessionImport(SessionImportRequest { input }))
                 .await
         }
         Effect::OpenSession(session_id) => {
@@ -176,6 +227,14 @@ async fn execute_effect(client: Arc<dyn AppClient>, effect: Effect) -> EffectRes
                 .request(AppRequest::MessageSend(MessageSendRequest {
                     session_id,
                     text,
+                }))
+                .await
+        }
+        Effect::SteerTask { task_id, text } => {
+            client
+                .request(AppRequest::TaskSteer(TaskSteerRequest {
+                    task_id,
+                    message: text,
                 }))
                 .await
         }
@@ -211,15 +270,61 @@ async fn execute_effect(client: Arc<dyn AppClient>, effect: Effect) -> EffectRes
                 }))
                 .await
         }
+        Effect::UpdateConfig { key, value } => {
+            client
+                .request(AppRequest::ConfigUpdate(ConfigUpdateRequest {
+                    updates: vec![ConfigEntryUpdate { key, value }],
+                }))
+                .await
+        }
         Effect::Subscribe { .. } => unreachable!("subscription effects are scheduled separately"),
     };
     map_response(response)
 }
 
+async fn edit_prompt(text: String) -> EffectResult {
+    match tokio::task::spawn_blocking(move || edit_prompt_blocking(&text)).await {
+        Ok(Ok(text)) => EffectResult::Edited(text),
+        Ok(Err(error)) => EffectResult::TransportError(error),
+        Err(error) => EffectResult::TransportError(format!("editor task failed: {error}")),
+    }
+}
+
+fn edit_prompt_blocking(text: &str) -> Result<String, String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_owned());
+    let words = shell_words::split(&editor).map_err(|error| format!("invalid editor: {error}"))?;
+    let (program, arguments) = words
+        .split_first()
+        .ok_or_else(|| "VISUAL/EDITOR is empty".to_owned())?;
+    let mut file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())?;
+    let status = Command::new(program)
+        .args(arguments)
+        .arg(file.path())
+        .status()
+        .map_err(|error| format!("failed to launch {program}: {error}"))?;
+    if !status.success() {
+        return Err(format!("editor exited with {status}"));
+    }
+    let mut edited = String::new();
+    file.reopen()
+        .map_err(|error| error.to_string())?
+        .read_to_string(&mut edited)
+        .map_err(|error| error.to_string())?;
+    Ok(edited)
+}
+
 fn map_response(response: Result<AppResponsePayload, ClientError>) -> EffectResult {
     match response {
         Ok(AppResponsePayload::SessionList(response)) => EffectResult::Sessions(response.sessions),
+        Ok(AppResponsePayload::Session(session)) => EffectResult::Session(session),
+        Ok(AppResponsePayload::Imported { session_id }) => EffectResult::Imported(session_id),
         Ok(AppResponsePayload::SessionSnapshot(snapshot)) => EffectResult::Snapshot(snapshot),
+        Ok(AppResponsePayload::Config(config)) => EffectResult::Config(config),
         Ok(AppResponsePayload::Task(task)) => EffectResult::Task(task),
         Ok(AppResponsePayload::Accepted { message }) => EffectResult::Accepted(message),
         Ok(AppResponsePayload::Exported { output, .. }) => EffectResult::Exported(output),

@@ -39,6 +39,22 @@ impl TerminalGuard {
     pub fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
         &mut self.terminal
     }
+
+    pub fn suspend(&mut self) -> io::Result<()> {
+        restore_terminal();
+        Ok(())
+    }
+
+    pub fn resume(&mut self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide
+        )?;
+        self.terminal.clear()
+    }
 }
 
 impl Drop for TerminalGuard {

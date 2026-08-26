@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use fixtrace_protocol::*;
-use fixtrace_tui::{ConnectionMode, Effect, InspectorTab, Model, TuiEvent, render, update};
+use fixtrace_tui::{ConnectionMode, Effect, InspectorTab, Model, Theme, TuiEvent, render, update};
 use ratatui::{Terminal, backend::TestBackend};
 use uuid::Uuid;
 
@@ -71,6 +71,77 @@ fn first_ctrl_c_cancels_task_and_second_exits() {
     assert!(!model.should_quit);
     assert!(update(&mut model, ctrl_c).is_empty());
     assert!(model.should_quit);
+}
+
+#[test]
+fn slash_commands_create_record_and_update_configuration() {
+    let mut model = fixture_model();
+    let effects = submit_text(
+        &mut model,
+        "/new '/tmp/project with space' --oracle 'cargo test --all' --title repair",
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CreateSession { project, oracle, title }]
+            if project == std::path::Path::new("/tmp/project with space")
+                && oracle == "cargo test --all"
+                && title.as_deref() == Some("repair")
+    ));
+
+    let effects = submit_text(&mut model, "/record printf fixed '>' fixture.txt");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::StartTask {
+            input: TaskInput::RecordTrace { line },
+            ..
+        }] if line == "printf fixed > fixture.txt"
+    ));
+
+    let effects = submit_text(&mut model, "/permissions read_only");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::UpdateConfig { key, value: ConfigValue::String(value) }]
+            if key == "approval.policy" && value == "read_only"
+    ));
+}
+
+#[test]
+fn theme_and_entity_reference_completion_are_ui_state_only() {
+    let mut model = fixture_model();
+    assert!(submit_text(&mut model, "/theme mono").is_empty());
+    assert_eq!(model.theme, Theme::Monochrome);
+
+    model.replace_composer("Please inspect @act");
+    let effects = update(
+        &mut model,
+        TuiEvent::Terminal(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))),
+    );
+    assert!(effects.is_empty());
+    assert_eq!(model.composer_text(), "Please inspect @action:5 ");
+}
+
+#[test]
+fn natural_message_steers_an_active_agent_task() {
+    let mut model = fixture_model();
+    let task_id = model.active_task().unwrap().id;
+    let effects = submit_text(&mut model, "Focus on the permission change.");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SteerTask { task_id: actual, text }]
+            if *actual == task_id && text == "Focus on the permission change."
+    ));
+}
+
+fn submit_text(model: &mut Model, text: &str) -> Vec<Effect> {
+    model.modal = None;
+    model.replace_composer(text);
+    update(
+        model,
+        TuiEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
+    )
 }
 
 fn rendered(width: u16, height: u16, tab: InspectorTab) -> String {

@@ -16,6 +16,8 @@ fixtrace-server = { path = "../fixtrace-server" }
 futures-util = "0.3.34"
 ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
 ratatui-textarea = "0.9.2"
+shell-words = "1.1"
+tempfile = "3.23"
 thiserror = "2.0"
 textwrap = "0.16.2"
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }

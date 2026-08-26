@@ -94,6 +94,34 @@ where
     P: LlmProvider,
     T: AgentToolExecutor,
 {
+    run_agent_with_prompt_and_steering(
+        provider,
+        tools,
+        config,
+        cancellation,
+        progress,
+        history,
+        user_prompt,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_agent_with_prompt_and_steering<P, T>(
+    provider: &P,
+    tools: &mut T,
+    config: &FixTraceConfig,
+    cancellation: CancellationToken,
+    progress: Option<&ProgressSender>,
+    history: AgentHistory<'_>,
+    user_prompt: Option<&str>,
+    mut steering: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Result<AgentRunResult, AppError>
+where
+    P: LlmProvider,
+    T: AgentToolExecutor,
+{
     let mut messages = initial_messages(user_prompt);
     for message in &messages {
         history.record("messages", &serde_json::to_value(message)?)?;
@@ -119,16 +147,38 @@ where
         if let Some(progress) = progress {
             progress.emit(ProgressEvent::AgentStepStarted { step });
         }
-        let response = match provider
-            .complete(
+        let response_result = loop {
+            let completion = provider.complete(
                 LlmRequest {
                     messages: messages.clone(),
                     tools: tools.definitions(),
                 },
                 cancellation.clone(),
-            )
-            .await
-        {
+            );
+            tokio::pin!(completion);
+            if let Some(receiver) = steering.as_mut() {
+                tokio::select! {
+                    biased;
+                    message = receiver.recv() => {
+                        if let Some(message) = message {
+                            let message = ChatMessage::text(
+                                MessageRole::User,
+                                format!("User steering for the active analysis:\n{message}"),
+                            );
+                            history.record("messages", &serde_json::to_value(&message)?)?;
+                            messages.push(message);
+                            continue;
+                        }
+                        steering = None;
+                        break completion.await;
+                    }
+                    result = &mut completion => break result,
+                }
+            } else {
+                break completion.await;
+            }
+        };
+        let response = match response_result {
             Err(_) if cancellation.is_cancelled() => {
                 return Ok(stopped(usage, step, AgentStopReason::Cancelled));
             }
@@ -393,7 +443,10 @@ mod tests {
         replay::oracle::OracleSpec,
     };
 
-    use super::{AgentHistory, AgentStopReason, parse_diagnosis, run_agent};
+    use super::{
+        AgentHistory, AgentStopReason, parse_diagnosis, run_agent,
+        run_agent_with_prompt_and_steering,
+    };
 
     struct FakeTools;
 
@@ -535,6 +588,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn queued_steering_is_added_without_consuming_an_agent_step() {
+        let trial_id = Uuid::new_v4();
+        let diagnosis = Diagnosis {
+            statement: "steered verified diagnosis".to_owned(),
+            minimal_action_ids: vec![1],
+            evidence: vec![EvidenceClaim {
+                claim: "Action 1 is necessary".to_owned(),
+                classification: EvidenceClassification::Necessary,
+                action_ids: vec![1],
+                trial_ids: vec![trial_id],
+            }],
+            limitations: vec!["test".to_owned()],
+            usage: UsageSummary::default(),
+        };
+        let provider = MockProvider::new([LlmResponse {
+            content: Some(serde_json::to_string(&diagnosis).unwrap()),
+            tool_calls: Vec::new(),
+            usage: known_usage(),
+            request_id: Some("steered-request".to_owned()),
+            model: Some("mock".to_owned()),
+        }]);
+        let temp = tempdir().unwrap();
+        let database = HistoryDatabase::open(temp.path().join("history.sqlite3")).unwrap();
+        let session = test_session(temp.path().to_path_buf());
+        database.save_session(&session).unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send("focus on filesystem evidence".to_owned())
+            .unwrap();
+        drop(sender);
+
+        let result = run_agent_with_prompt_and_steering(
+            &provider,
+            &mut FakeTools,
+            &FixTraceConfig::default(),
+            CancellationToken::new(),
+            None,
+            AgentHistory {
+                database: Some(&database),
+                session_id: Some(session.id),
+            },
+            Some("initial focus"),
+            Some(receiver),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, AgentStopReason::Completed);
+        assert_eq!(result.steps, 1);
+        let messages = database.load_json("messages", session.id).unwrap();
+        assert!(messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("focus on filesystem evidence"))
+        }));
+    }
+
     #[test]
     fn parses_fenced_diagnosis_and_uses_runtime_usage_instead_of_model_claims() {
         let trial_id = Uuid::new_v4();
@@ -574,6 +685,8 @@ mod tests {
         let now = Utc::now();
         SessionRecord {
             id: Uuid::new_v4(),
+            parent_session_id: None,
+            archived: false,
             project_name: "agent-test".to_owned(),
             original_project: root.join("project"),
             baseline_path: root.join("baseline"),

@@ -197,6 +197,8 @@ mod tests {
         let now = Utc::now();
         let session = SessionRecord {
             id,
+            parent_session_id: None,
+            archived: false,
             project_name: "fixture".to_owned(),
             original_project: PathBuf::from("/tmp/fixture"),
             baseline_path: PathBuf::from("/tmp/baseline"),

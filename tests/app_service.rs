@@ -50,6 +50,7 @@ async fn app_service_is_the_stateful_entry_point_used_without_cli_types() {
         .execute(AppCommand::InitializeSession {
             project,
             oracle: "false".to_owned(),
+            title: None,
         })
         .await
         .expect("session should initialize through App Service");
@@ -114,10 +115,12 @@ async fn app_service_runs_independent_sessions_concurrently() {
         service.execute(AppCommand::InitializeSession {
             project: first,
             oracle: "sleep 1; false".to_owned(),
+            title: None,
         }),
         service.execute(AppCommand::InitializeSession {
             project: second,
             oracle: "sleep 1; false".to_owned(),
+            title: None,
         }),
     );
     first_result.expect("first session should initialize");

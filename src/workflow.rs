@@ -68,6 +68,8 @@ pub async fn initialize_session(
     let now = Utc::now();
     let mut session = SessionRecord {
         id: session_id,
+        parent_session_id: None,
+        archived: false,
         project_name,
         original_project,
         baseline_path: baseline_path.clone(),

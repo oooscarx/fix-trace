@@ -33,14 +33,36 @@ pub enum AppCommand {
     InitializeSession {
         project: PathBuf,
         oracle: String,
+        title: Option<String>,
     },
     RunControlledShell {
         session_id: Uuid,
+    },
+    RecordLine {
+        session_id: Uuid,
+        line: String,
     },
     AnalyzeSession {
         session_id: Uuid,
         no_llm: bool,
         prompt: Option<String>,
+    },
+    ForkSession {
+        session_id: Uuid,
+        title: Option<String>,
+    },
+    ArchiveSession {
+        session_id: Uuid,
+    },
+    RunCandidate {
+        session_id: Uuid,
+        action_ids: Option<Vec<u64>>,
+        repetitions: Option<u32>,
+    },
+    RepeatTrial {
+        session_id: Uuid,
+        trial_id: Uuid,
+        repetitions: Option<u32>,
     },
     GetSession {
         session_id: Uuid,
@@ -68,7 +90,10 @@ pub enum AppCommand {
 pub enum AppResponse {
     SessionInitialized { session: SessionRecord },
     ControlledShellCompleted { session_id: Uuid },
+    RecordingUpdated { session_id: Uuid, message: String },
     SessionAnalyzed { result: Box<AnalysisResult> },
+    SessionChanged { session: SessionRecord },
+    TrialCompleted { session_id: Uuid, trial: Trial },
     Session { detail: Box<SessionDetail> },
     Sessions { sessions: Vec<SessionRecord> },
     SessionExported { session_id: Uuid, output: PathBuf },

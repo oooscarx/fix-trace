@@ -118,6 +118,8 @@ WS client B ──────┘          │                         │
 
 U4 Ratatui 客户端采用 `Model + TuiEvent + update -> Effect + view` 单向数据流。terminal、server、tick 和 effect result 进入同一个有界事件 channel；IO effect 在后台调用 `AppClient`，view 只读取共享 `SessionView`。Agent/Tool/Trial progress 先转换成 protocol timeline event，TUI 不读取内部历史表。详细交互和终端恢复见 [TUI](tui.md)。
 
+U5 将全部 TUI 命令保持在同一 Effect 边界：Session create/fork/archive/import/export、单步受控录制、verify/replay/analyze/diagnose/repeat、配置与 Approval 响应都只产生协议请求。活跃 Agent 的输入使用 task steer channel；长 Prompt 编辑器运行前暂停 terminal event reader 并恢复 alternate screen。Session Diff 由 App Service 从 baseline manifest 与 worktree snapshot 投影，并对有界 UTF-8 文件生成 unified diff，客户端不读取文件。
+
 受控 shell 暂时作为兼容命令由 App Service 启动，因而旧脚本无行为变化；未来 TUI/GUI 不复用其 stdin/stdout 循环，而使用 U2 的类型化 message/action 命令。
 
 ## 主要模块

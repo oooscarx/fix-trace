@@ -5,8 +5,9 @@ use fixtrace_client::{AppClient, ClientError, InProcessClient};
 use fixtrace_protocol::{
     AppEvent, AppRequest, AppResponsePayload, ClientCapabilities, ConfigEntryUpdate,
     ConfigUpdateRequest, ConfigValue, InitializeRequest, PROTOCOL_VERSION, PageRequest,
-    SessionCreateRequest, SessionSnapshotRequest, SubscribeRequest, TaskIdRequest, TaskInput,
-    TaskStartRequest, TaskStatus,
+    SessionCreateRequest, SessionForkRequest, SessionIdRequest, SessionSnapshotRequest,
+    SubscribeRequest, TaskIdRequest, TaskInput, TaskStartRequest, TaskStatus, TrialRepeatRequest,
+    TrialRunRequest,
 };
 use tempfile::tempdir;
 use tokio::time::{Instant, timeout};
@@ -138,6 +139,154 @@ async fn in_process_client_catches_up_then_receives_live_events_in_order() {
 }
 
 #[tokio::test]
+async fn in_process_client_supports_complete_session_and_trial_workflow() {
+    let temp = tempdir().unwrap();
+    let state = temp.path().join("state");
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("fixture.txt"), "broken\n").unwrap();
+    let service = Arc::new(
+        FixTraceAppService::start(
+            AppServiceOptions {
+                state_dir: Some(state.clone()),
+                config_path: None,
+                initialize_event_store: true,
+            },
+            CancellationToken::new(),
+        )
+        .unwrap(),
+    );
+    let client = InProcessClient::new(service);
+    client.initialize(initialize_request()).await.unwrap();
+    let config = client
+        .request(AppRequest::ConfigUpdate(ConfigUpdateRequest {
+            updates: vec![
+                ConfigEntryUpdate {
+                    key: "replay.repetitions".to_owned(),
+                    value: ConfigValue::Integer(1),
+                },
+                ConfigEntryUpdate {
+                    key: "approval.policy".to_owned(),
+                    value: ConfigValue::String("read_only".to_owned()),
+                },
+            ],
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        config,
+        AppResponsePayload::Config(ref config)
+            if config.approval_policy == fixtrace_protocol::ApprovalPolicy::ReadOnly
+    ));
+
+    let created = client
+        .request(AppRequest::SessionCreate(SessionCreateRequest {
+            project,
+            oracle: "test \"$(cat fixture.txt)\" = fixed".to_owned(),
+            title: Some("named session".to_owned()),
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Session(created) = created else {
+        panic!("session/create returned the wrong response");
+    };
+    assert_eq!(created.project_name, "named session");
+
+    let record = client
+        .request(AppRequest::TaskStart(TaskStartRequest {
+            session_id: Some(created.id),
+            input: TaskInput::RecordTrace {
+                line: "printf fixed > fixture.txt".to_owned(),
+            },
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Task(record) = record else {
+        panic!("record task returned the wrong response");
+    };
+    wait_for_task(&client, record.id, TaskStatus::Completed).await;
+    let snapshot = client
+        .request(AppRequest::SessionGetSnapshot(SessionSnapshotRequest {
+            session_id: created.id,
+            timeline_page: PageRequest {
+                cursor: None,
+                limit: Some(100),
+            },
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::SessionSnapshot(snapshot) = snapshot else {
+        panic!("session/get_snapshot returned the wrong response");
+    };
+    assert!(snapshot.session.diff.files.iter().any(|file| {
+        file.path == "fixture.txt"
+            && file.change_kind.contains("content_modified")
+            && file
+                .unified_diff
+                .as_deref()
+                .is_some_and(|diff| diff.contains("-broken") && diff.contains("+fixed"))
+    }));
+    assert_eq!(snapshot.session.actions.len(), 1);
+
+    let finish = client
+        .request(AppRequest::TaskStart(TaskStartRequest {
+            session_id: Some(created.id),
+            input: TaskInput::RecordTrace {
+                line: ":done".to_owned(),
+            },
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Task(finish) = finish else {
+        panic!("finish recording task returned the wrong response");
+    };
+    wait_for_task(&client, finish.id, TaskStatus::Completed).await;
+
+    let trial = client
+        .request(AppRequest::TrialRun(TrialRunRequest {
+            session_id: created.id,
+            action_ids: Vec::new(),
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Trial(trial) = trial else {
+        panic!("trial/run returned the wrong response");
+    };
+    let repeated = client
+        .request(AppRequest::TrialRepeat(TrialRepeatRequest {
+            session_id: created.id,
+            trial_id: trial.id,
+            repetitions: Some(1),
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(repeated, AppResponsePayload::Trial(_)));
+
+    let forked = client
+        .request(AppRequest::SessionFork(SessionForkRequest {
+            session_id: created.id,
+            title: Some("forked session".to_owned()),
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Session(forked) = forked else {
+        panic!("session/fork returned the wrong response");
+    };
+    assert_eq!(forked.parent_session_id, Some(created.id));
+    assert_eq!(forked.project_name, "forked session");
+    let archived = client
+        .request(AppRequest::SessionArchive(SessionIdRequest {
+            session_id: forked.id,
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        archived,
+        AppResponsePayload::Session(ref session) if session.archived
+    ));
+}
+
+#[tokio::test]
 async fn protocol_task_cancel_reaches_a_running_operation() {
     let temp = tempdir().unwrap();
     let service = Arc::new(
@@ -210,5 +359,27 @@ fn initialize_request() -> InitializeRequest {
             supports_graph: true,
             supports_artifacts: true,
         },
+    }
+}
+
+async fn wait_for_task(client: &InProcessClient, task_id: Uuid, expected: TaskStatus) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = client
+            .request(AppRequest::TaskGet(TaskIdRequest { task_id }))
+            .await
+            .unwrap();
+        let AppResponsePayload::Task(task) = response else {
+            panic!("task/get returned the wrong response");
+        };
+        if task.status.is_terminal() {
+            assert_eq!(task.status, expected);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "task did not finish before deadline"
+        );
+        tokio::task::yield_now().await;
     }
 }

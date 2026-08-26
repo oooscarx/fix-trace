@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs,
     sync::{Arc, Mutex},
 };
 
@@ -13,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     agent::{
         diagnosis::Diagnosis,
-        loop_runner::{AgentHistory, run_agent_with_prompt},
+        loop_runner::{AgentHistory, run_agent_with_prompt_and_steering},
         tools::AnalysisTools,
     },
     config::FixTraceConfig,
@@ -27,6 +28,7 @@ use crate::{
     llm::openai_compatible::OpenAiCompatibleProvider,
     progress::{ProgressEvent, ProgressSender},
     recorder::repl,
+    sandbox::local_copy::{copy_project, protect_read_only},
     workflow::{analyze_session, initialize_session, runner_for_session},
 };
 
@@ -58,6 +60,8 @@ pub struct FixTraceAppService {
     pub(super) cancellation: CancellationToken,
     pub(super) task_cancellations: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
     pub(super) session_tasks: Arc<Mutex<HashMap<Uuid, Uuid>>>,
+    pub(super) task_steers: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<String>>>>,
+    pub(super) task_steer_receivers: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedReceiver<String>>>>,
 }
 
 impl FixTraceAppService {
@@ -80,6 +84,7 @@ impl FixTraceAppService {
         let (events, initial_events) = broadcast::channel(4_096);
         drop(initial_events);
         let (commands, receiver) = mpsc::channel(32);
+        let task_steer_receivers = Arc::new(Mutex::new(HashMap::new()));
         let actor = AppServiceActor {
             state_paths,
             config_path,
@@ -87,6 +92,7 @@ impl FixTraceAppService {
             progress: progress.clone(),
             event_store: event_store.clone(),
             events: events.clone(),
+            task_steer_receivers: task_steer_receivers.clone(),
             receiver,
         };
         tokio::spawn(actor.run());
@@ -98,6 +104,8 @@ impl FixTraceAppService {
             cancellation,
             task_cancellations: Arc::new(Mutex::new(HashMap::new())),
             session_tasks: Arc::new(Mutex::new(HashMap::new())),
+            task_steers: Arc::new(Mutex::new(HashMap::new())),
+            task_steer_receivers,
         })
     }
 
@@ -187,6 +195,7 @@ struct AppServiceActor {
     progress: ProgressSender,
     event_store: EventStore,
     events: broadcast::Sender<EventEnvelope>,
+    task_steer_receivers: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedReceiver<String>>>>,
     receiver: mpsc::Receiver<CommandEnvelope>,
 }
 
@@ -222,6 +231,7 @@ impl AppServiceActor {
                         progress: self.progress.clone(),
                         event_store: self.event_store.clone(),
                         events: self.events.clone(),
+                        task_steer_receivers: self.task_steer_receivers.clone(),
                     };
                     tokio::spawn(async move {
                         let result = worker
@@ -242,6 +252,7 @@ struct AppServiceWorker {
     progress: ProgressSender,
     event_store: EventStore,
     events: broadcast::Sender<EventEnvelope>,
+    task_steer_receivers: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedReceiver<String>>>>,
 }
 
 impl AppServiceWorker {
@@ -276,8 +287,12 @@ impl AppServiceWorker {
         task_id: Option<Uuid>,
     ) -> Result<AppResponse, AppError> {
         match command {
-            AppCommand::InitializeSession { project, oracle } => {
-                let session = initialize_session(
+            AppCommand::InitializeSession {
+                project,
+                oracle,
+                title,
+            } => {
+                let mut session = initialize_session(
                     &self.state_paths,
                     database,
                     &self.config,
@@ -287,6 +302,10 @@ impl AppServiceWorker {
                     self.progress.clone(),
                 )
                 .await?;
+                if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
+                    session.project_name = title;
+                    database.save_session(&session)?;
+                }
                 self.publish(
                     Some(session.id),
                     None,
@@ -299,11 +318,65 @@ impl AppServiceWorker {
                 repl::run(database, &self.config, session_id, &cancellation, progress).await?;
                 Ok(AppResponse::ControlledShellCompleted { session_id })
             }
+            AppCommand::RecordLine { session_id, line } => {
+                let progress = self.progress_for(Some(session_id), task_id);
+                let item_id = Uuid::new_v4();
+                let tool_call_id = Uuid::new_v4().to_string();
+                progress.emit(ProgressEvent::ToolCallStarted {
+                    item_id,
+                    tool_call_id: tool_call_id.clone(),
+                    name: "record_action".to_owned(),
+                    arguments_summary: "one controlled recording step".to_owned(),
+                });
+                let outcome = repl::run_line(
+                    database,
+                    &self.config,
+                    session_id,
+                    &line,
+                    &cancellation,
+                    progress.clone(),
+                )
+                .await?;
+                progress.emit(ProgressEvent::ToolCallCompleted {
+                    item_id,
+                    tool_call_id,
+                    name: "record_action".to_owned(),
+                    arguments_summary: "one controlled recording step".to_owned(),
+                    result_summary: outcome.message.clone(),
+                });
+                let session = database.load_session(session_id)?;
+                self.publish(
+                    Some(session_id),
+                    task_id,
+                    AppEvent::SessionUpdated(presentation::session_summary(&session)),
+                )?;
+                Ok(AppResponse::RecordingUpdated {
+                    session_id,
+                    message: outcome.message,
+                })
+            }
             AppCommand::AnalyzeSession {
                 session_id,
                 no_llm,
                 prompt,
             } => {
+                let mut steering = task_id
+                    .map(|task_id| {
+                        self.task_steer_receivers
+                            .lock()
+                            .map_err(|_| {
+                                AppError::ServiceInvariant(
+                                    "task steering registry is poisoned".to_owned(),
+                                )
+                            })?
+                            .remove(&task_id)
+                            .ok_or_else(|| {
+                                AppError::ServiceInvariant(format!(
+                                    "task {task_id} has no steering receiver"
+                                ))
+                            })
+                    })
+                    .transpose()?;
                 let progress = self.progress_for(Some(session_id), task_id);
                 let report = analyze_session(
                     database,
@@ -328,7 +401,7 @@ impl AppServiceWorker {
                         Some(session_id),
                         cancellation.child_token(),
                     );
-                    let result = run_agent_with_prompt(
+                    let result = run_agent_with_prompt_and_steering(
                         &provider,
                         &mut tools,
                         &self.config,
@@ -339,6 +412,7 @@ impl AppServiceWorker {
                             session_id: Some(session_id),
                         },
                         prompt.as_deref(),
+                        steering.take(),
                     )
                     .await?;
                     if let Some(model_diagnosis) = &result.diagnosis {
@@ -346,6 +420,17 @@ impl AppServiceWorker {
                     }
                     agent = Some(result);
                 } else {
+                    let mut steering_count = 0_usize;
+                    if let Some(receiver) = steering.as_mut() {
+                        while receiver.try_recv().is_ok() {
+                            steering_count = steering_count.saturating_add(1);
+                        }
+                    }
+                    if steering_count > 0 {
+                        diagnosis.limitations.push(format!(
+                            "{steering_count} steering message(s) were recorded, but offline mode produces a deterministic evidence summary."
+                        ));
+                    }
                     database.insert_json(
                         "diagnoses",
                         Some(session_id),
@@ -397,6 +482,124 @@ impl AppServiceWorker {
                         llm_mode,
                     }),
                 })
+            }
+            AppCommand::ForkSession { session_id, title } => {
+                let source = database.load_session(session_id)?;
+                let fork_id = Uuid::new_v4();
+                let fork_root = self.state_paths.session_root(fork_id);
+                let baseline_path = fork_root.join("baseline");
+                let worktree_path = fork_root.join("worktree");
+                fs::create_dir(&fork_root).map_err(|error| {
+                    AppError::io("create fork session directory", &fork_root, error)
+                })?;
+                copy_project(
+                    &source.baseline_path,
+                    &baseline_path,
+                    self.config.replay.include_target,
+                )?;
+                copy_project(
+                    &source.worktree_path,
+                    &worktree_path,
+                    self.config.replay.include_target,
+                )?;
+                protect_read_only(&baseline_path)?;
+                let now = chrono::Utc::now();
+                let mut fork = source.clone();
+                fork.id = fork_id;
+                fork.parent_session_id = Some(source.id);
+                fork.archived = false;
+                fork.project_name = title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| format!("{} (fork)", source.project_name));
+                fork.baseline_path = baseline_path;
+                fork.worktree_path = worktree_path;
+                fork.created_at = now;
+                fork.updated_at = now;
+                database.save_session(&fork)?;
+                for action in database.load_actions(session_id)? {
+                    database.save_action(fork_id, &action)?;
+                }
+                self.publish(
+                    Some(fork_id),
+                    None,
+                    AppEvent::SessionCreated(presentation::session_summary(&fork)),
+                )?;
+                Ok(AppResponse::SessionChanged { session: fork })
+            }
+            AppCommand::ArchiveSession { session_id } => {
+                let mut session = database.load_session(session_id)?;
+                session.archived = true;
+                session.updated_at = chrono::Utc::now();
+                database.save_session(&session)?;
+                self.publish(
+                    Some(session_id),
+                    None,
+                    AppEvent::SessionUpdated(presentation::session_summary(&session)),
+                )?;
+                Ok(AppResponse::SessionChanged { session })
+            }
+            AppCommand::RunCandidate {
+                session_id,
+                action_ids,
+                repetitions,
+            } => {
+                let session = database.load_session(session_id)?;
+                let all_actions = database.load_actions(session_id)?;
+                let actions = if let Some(action_ids) = action_ids {
+                    let mut selected = Vec::new();
+                    for action_id in action_ids {
+                        selected.push(
+                            all_actions
+                                .iter()
+                                .find(|action| action.id == action_id)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    AppError::InvalidConfig(format!(
+                                        "candidate references unknown action {action_id}"
+                                    ))
+                                })?,
+                        );
+                    }
+                    selected
+                } else {
+                    all_actions
+                };
+                let mut config = self.config.clone();
+                if let Some(repetitions) = repetitions {
+                    if repetitions == 0 {
+                        return Err(AppError::InvalidConfig(
+                            "trial repetitions must be positive".to_owned(),
+                        ));
+                    }
+                    config.replay.repetitions = repetitions;
+                }
+                let progress = self.progress_for(Some(session_id), task_id);
+                let runner = runner_for_session(&session, &config, progress)?;
+                let trial = runner.run(&actions, &cancellation).await?;
+                database.save_trial(session_id, &trial)?;
+                Ok(AppResponse::TrialCompleted { session_id, trial })
+            }
+            AppCommand::RepeatTrial {
+                session_id,
+                trial_id,
+                repetitions,
+            } => {
+                let trial = database
+                    .load_trials(session_id)?
+                    .into_iter()
+                    .find(|trial| trial.id == trial_id)
+                    .ok_or_else(|| AppError::Process(format!("trial {trial_id} was not found")))?;
+                return Box::pin(self.execute_with_database(
+                    AppCommand::RunCandidate {
+                        session_id,
+                        action_ids: Some(trial.action_ids),
+                        repetitions,
+                    },
+                    database,
+                    cancellation,
+                    task_id,
+                ))
+                .await;
             }
             AppCommand::GetSession { session_id } => Ok(AppResponse::Session {
                 detail: Box::new(SessionDetail {

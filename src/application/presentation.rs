@@ -33,8 +33,8 @@ pub(super) fn session_summary(session: &SessionRecord) -> fixtrace_protocol::Ses
             SessionStatus::Invalid => SourceSessionStatus::Invalid,
         },
         active_task_id: None,
-        parent_session_id: None,
-        archived: false,
+        parent_session_id: session.parent_session_id,
+        archived: session.archived,
         created_at: session.created_at,
         updated_at: session.updated_at,
     })

@@ -15,7 +15,7 @@ use fixtrace::{
 use fixtrace_client::{AppClient, InProcessClient};
 use fixtrace_protocol::{
     AppEvent, AppRequest, AppResponsePayload, ClientCapabilities, InitializeRequest,
-    MessageSendRequest, PROTOCOL_VERSION, SubscribeRequest,
+    MessageSendRequest, PROTOCOL_VERSION, SubscribeRequest, TaskSteerRequest,
 };
 use serde::Deserialize;
 use tempfile::tempdir;
@@ -50,6 +50,8 @@ async fn message_send_streams_real_trial_and_agent_timeline_events() {
     database
         .save_session(&SessionRecord {
             id: session_id,
+            parent_session_id: None,
+            archived: false,
             project_name: "tui-vertical".to_owned(),
             original_project: baseline.clone(),
             baseline_path: baseline.clone(),
@@ -109,8 +111,17 @@ async fn message_send_streams_real_trial_and_agent_timeline_events() {
         panic!("message/send must start an Agent task")
     };
     assert_eq!(task.session_id, Some(session_id));
+    assert!(task.supports_steer);
+    let steered = client
+        .request(AppRequest::TaskSteer(TaskSteerRequest {
+            task_id: task.id,
+            message: "Focus on filesystem evidence.".to_owned(),
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(steered, AppResponsePayload::Accepted { .. }));
 
-    let mut user = false;
+    let mut user_messages = 0;
     let mut trial = false;
     let mut agent_started = false;
     let mut agent_delta = false;
@@ -121,7 +132,9 @@ async fn message_send_streams_real_trial_and_agent_timeline_events() {
             .expect("Agent turn should finish")
             .expect("event stream should remain contiguous");
         match event.payload {
-            AppEvent::ItemCompleted(fixtrace_protocol::TimelineItem::UserMessage(_)) => user = true,
+            AppEvent::ItemCompleted(fixtrace_protocol::TimelineItem::UserMessage(_)) => {
+                user_messages += 1;
+            }
             AppEvent::ItemStarted(fixtrace_protocol::TimelineItem::Trial(_)) => trial = true,
             AppEvent::ItemStarted(fixtrace_protocol::TimelineItem::AgentMessage(_)) => {
                 agent_started = true;
@@ -139,7 +152,10 @@ async fn message_send_streams_real_trial_and_agent_timeline_events() {
             _ => {}
         }
     }
-    assert!(user, "user message must be on the shared timeline");
+    assert_eq!(
+        user_messages, 2,
+        "initial and steering messages must share the timeline"
+    );
     assert!(trial, "real minimization trials must stream to the UI");
     assert!(agent_started && agent_delta && agent_completed);
 }

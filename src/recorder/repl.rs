@@ -32,6 +32,130 @@ use crate::{
 
 use super::patch::replacements_between;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordLineOutcome {
+    pub message: String,
+}
+
+pub async fn run_line(
+    database: &HistoryDatabase,
+    config: &FixTraceConfig,
+    session_id: Uuid,
+    line: &str,
+    cancellation: &CancellationToken,
+    progress: ProgressSender,
+) -> Result<RecordLineOutcome, AppError> {
+    let mut session = database.load_session(session_id)?;
+    if session.status != SessionStatus::Recording {
+        return Err(AppError::Process(format!(
+            "session {session_id} is {:?}, not recording",
+            session.status
+        )));
+    }
+    let mut actions = database.load_actions(session_id)?;
+    let mut replay_state = ReplayState::restore_context(
+        session.worktree_path.clone(),
+        config.replay.include_target,
+        &actions,
+    )?;
+    let line = line.trim();
+    if line.is_empty() {
+        return Err(AppError::Process(
+            "recorded command cannot be empty".to_owned(),
+        ));
+    }
+    match line {
+        ":status" => Ok(RecordLineOutcome {
+            message: format!(
+                "session={session_id} status={:?} actions={} cwd={}",
+                session.status,
+                actions.len(),
+                display_cwd(replay_state.cwd())
+            ),
+        }),
+        ":verify" => {
+            let evidence = run_oracle(&session.oracle, &replay_state, cancellation).await?;
+            Ok(RecordLineOutcome {
+                message: format!(
+                    "Oracle {} (exit={:?}, {} ms)",
+                    if evidence.passed() { "passed" } else { "failed" },
+                    evidence.exit_code,
+                    evidence.duration_ms
+                ),
+            })
+        }
+        ":done" => {
+            let runner = runner_for_session(&session, config, progress)?;
+            let trial = runner.run(&actions, cancellation).await?;
+            database.save_trial(session_id, &trial)?;
+            match trial.outcome {
+                TrialOutcome::StablePass => {
+                    session.status = SessionStatus::ReadyForAnalysis;
+                    touch_session(database, &mut session)?;
+                }
+                TrialOutcome::Cancelled => {
+                    session.status = SessionStatus::Cancelled;
+                    touch_session(database, &mut session)?;
+                }
+                _ => {}
+            }
+            Ok(RecordLineOutcome {
+                message: format!("full replay trial {}: {:?}", trial.id, trial.outcome),
+            })
+        }
+        _ if line.starts_with(':') => Err(AppError::Process(
+            "TUI recording supports :status, :verify, and :done; use the controlled shell for :edit and :checkpoint"
+                .to_owned(),
+        )),
+        _ => {
+            let kind = parse_action(line, replay_state.cwd())?;
+            let id = next_action_id(&actions);
+            let mut action = Action {
+                id,
+                original_order: id,
+                cwd_before: replay_state.cwd().to_path_buf(),
+                kind,
+                replayable: true,
+                note: None,
+                result: None,
+            };
+            let result = replay_action(
+                &mut replay_state,
+                &action,
+                session.oracle.timeout(),
+                cancellation,
+            )
+            .await?;
+            let message = format!(
+                "recorded action {id}: exit={:?}, {} ms{}{}",
+                result.exit_code,
+                result.duration_ms,
+                output_suffix("stdout", &result.stdout),
+                output_suffix("stderr", &result.stderr)
+            );
+            action.result = Some(result);
+            database.save_action(session_id, &action)?;
+            actions.push(action);
+            touch_session(database, &mut session)?;
+            Ok(RecordLineOutcome { message })
+        }
+    }
+}
+
+fn output_suffix(label: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let preview = trimmed.chars().take(240).collect::<String>();
+    let suffix = if trimmed.chars().count() > 240 {
+        "…"
+    } else {
+        ""
+    };
+    format!(" · {label}: {preview}{suffix}")
+}
+
 pub async fn run(
     database: &HistoryDatabase,
     config: &FixTraceConfig,

@@ -117,7 +117,7 @@ pub struct SessionSnapshotRequest {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum TaskInput {
     AgentTurn { prompt: String },
-    RecordTrace,
+    RecordTrace { line: String },
     VerifyBaseline,
     ReplayFullTrace,
     AnalyzeMinimalTrace { no_llm: bool },
@@ -131,7 +131,7 @@ impl TaskInput {
     pub const fn kind(&self) -> TaskKind {
         match self {
             Self::AgentTurn { .. } => TaskKind::AgentTurn,
-            Self::RecordTrace => TaskKind::RecordTrace,
+            Self::RecordTrace { .. } => TaskKind::RecordTrace,
             Self::VerifyBaseline => TaskKind::VerifyBaseline,
             Self::ReplayFullTrace => TaskKind::ReplayFullTrace,
             Self::AnalyzeMinimalTrace { .. } => TaskKind::AnalyzeMinimalTrace,

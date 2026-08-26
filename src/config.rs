@@ -11,6 +11,7 @@ pub struct FixTraceConfig {
     pub pricing: PricingConfig,
     pub budget: BudgetConfig,
     pub replay: ReplayConfig,
+    pub approval: ApprovalConfig,
 }
 
 impl FixTraceConfig {
@@ -71,6 +72,20 @@ impl FixTraceConfig {
                 self.replay.oracle_timeout_secs = parse_value(key, value)?;
             }
             "replay.include_target" => self.replay.include_target = parse_value(key, value)?,
+            "approval.policy" => {
+                self.approval.policy = match value {
+                    "read_only" => fixtrace_protocol::ApprovalPolicy::ReadOnly,
+                    "ask_always" => fixtrace_protocol::ApprovalPolicy::AskAlways,
+                    "ask_for_opaque" => fixtrace_protocol::ApprovalPolicy::AskForOpaque,
+                    "auto_recorded_safe" => fixtrace_protocol::ApprovalPolicy::AutoRecordedSafe,
+                    _ => {
+                        return Err(AppError::InvalidConfig(
+                            "approval.policy must be one of read_only, ask_always, ask_for_opaque, or auto_recorded_safe"
+                                .to_owned(),
+                        ));
+                    }
+                };
+            }
             "model.api_key" => {
                 return Err(AppError::InvalidConfig(
                     "API keys must not be stored; set model.api_key_env instead".to_owned(),
@@ -204,6 +219,12 @@ impl Default for ReplayConfig {
             include_target: false,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ApprovalConfig {
+    pub policy: fixtrace_protocol::ApprovalPolicy,
 }
 
 #[cfg(test)]

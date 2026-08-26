@@ -13,6 +13,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     command("/record", "Record a repair trace"),
     command("/verify", "Verify the baseline Oracle"),
     command("/replay", "Replay the full recorded trace"),
+    command("/repeat", "Repeat a Trial by id"),
     command("/analyze", "Run verified minimization"),
     command("/diagnose", "Ask the evidence Agent for a diagnosis"),
     command("/cancel", "Cancel the active task"),

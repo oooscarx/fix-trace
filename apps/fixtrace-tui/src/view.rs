@@ -10,11 +10,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{InspectorTab, Modal, Model, commands};
 
-const ACCENT: Color = Color::Cyan;
-const SUCCESS: Color = Color::Green;
-const WARNING: Color = Color::Yellow;
-const DANGER: Color = Color::Red;
-
 pub fn render(frame: &mut Frame<'_>, model: &Model) {
     let area = frame.area();
     if area.width < 60 || area.height < 16 {
@@ -48,6 +43,8 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
         render_modal(frame, area, model, modal);
     } else if model.composer_text().trim_start().starts_with('/') {
         render_palette(frame, area, model, false);
+    } else if let Some(query) = model.reference_query() {
+        render_references(frame, area, model, query);
     }
 }
 
@@ -71,13 +68,13 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &Model) {
             " FixTrace ",
             Style::default()
                 .fg(Color::Black)
-                .bg(ACCENT)
+                .bg(model.theme.accent())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(" {session}  ")),
         Span::styled(
             &model.initialized.config_summary.model,
-            Style::default().fg(ACCENT),
+            Style::default().fg(model.theme.accent()),
         ),
         Span::raw(format!(
             " · {} · {:?} · task {task} · {tokens} tok · ${cost:.4} · {:.0}% · {} · {offline}",
@@ -142,6 +139,8 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, model: &Model) {
             let marker = if selected { "▶" } else { " " };
             let task = if session.active_task_id.is_some() {
                 " • running"
+            } else if session.archived {
+                " • archived"
             } else {
                 ""
             };
@@ -150,12 +149,14 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, model: &Model) {
                     Span::styled(
                         format!("{marker} {}", session.project_name),
                         if selected {
-                            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(model.theme.accent())
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         },
                     ),
-                    Span::styled(task, Style::default().fg(WARNING)),
+                    Span::styled(task, Style::default().fg(model.theme.warning())),
                 ]),
                 Line::styled(
                     format!(
@@ -220,11 +221,11 @@ fn timeline_lines(
 ) {
     match item {
         TimelineItem::UserMessage(item) => {
-            lines.push(label(" YOU ", ACCENT, item.header.status));
+            lines.push(label(" YOU ", model.theme.accent(), item.header.status));
             push_wrapped(lines, &item.text, width, Style::default());
         }
         TimelineItem::AgentMessage(item) => {
-            lines.push(label(" AGENT ", SUCCESS, item.header.status));
+            lines.push(label(" AGENT ", model.theme.success(), item.header.status));
             push_wrapped(lines, &item.text, width, Style::default());
         }
         TimelineItem::ToolCall(item) => {
@@ -251,12 +252,21 @@ fn timeline_lines(
                     Style::default().fg(Color::Gray),
                 );
                 if let Some(result) = &item.result_summary {
-                    push_wrapped(lines, result, width, Style::default().fg(SUCCESS));
+                    push_wrapped(
+                        lines,
+                        result,
+                        width,
+                        Style::default().fg(model.theme.success()),
+                    );
                 }
             }
         }
         TimelineItem::CommandExecution(item) => {
-            lines.push(label(" COMMAND ", WARNING, item.header.status));
+            lines.push(label(
+                " COMMAND ",
+                model.theme.warning(),
+                item.header.status,
+            ));
             lines.push(Line::raw(format!("$ {}", item.command)));
             lines.push(Line::styled(
                 format!(
@@ -275,7 +285,7 @@ fn timeline_lines(
                 lines,
                 &item.stderr_preview,
                 width,
-                Style::default().fg(DANGER),
+                Style::default().fg(model.theme.danger()),
             );
         }
         TimelineItem::FilePatch(item) => {
@@ -290,9 +300,9 @@ fn timeline_lines(
         }
         TimelineItem::Trial(item) => {
             let color = match item.classification {
-                fixtrace_protocol::TrialClassification::StablePass => SUCCESS,
-                fixtrace_protocol::TrialClassification::StableFail => DANGER,
-                fixtrace_protocol::TrialClassification::Flaky => WARNING,
+                fixtrace_protocol::TrialClassification::StablePass => model.theme.success(),
+                fixtrace_protocol::TrialClassification::StableFail => model.theme.danger(),
+                fixtrace_protocol::TrialClassification::Flaky => model.theme.warning(),
                 _ => Color::Gray,
             };
             lines.push(label(" TRIAL ", color, item.header.status));
@@ -311,7 +321,11 @@ fn timeline_lines(
             )));
         }
         TimelineItem::Diagnosis(item) => {
-            lines.push(label(" DIAGNOSIS ", SUCCESS, item.header.status));
+            lines.push(label(
+                " DIAGNOSIS ",
+                model.theme.success(),
+                item.header.status,
+            ));
             push_wrapped(
                 lines,
                 &item.statement,
@@ -337,7 +351,11 @@ fn timeline_lines(
             }
         }
         TimelineItem::Approval(item) => {
-            lines.push(label(" APPROVAL ", WARNING, item.header.status));
+            lines.push(label(
+                " APPROVAL ",
+                model.theme.warning(),
+                item.header.status,
+            ));
             lines.push(Line::raw(item.approval.request.title.clone()));
         }
         TimelineItem::Usage(item) => {
@@ -352,12 +370,12 @@ fn timeline_lines(
             push_wrapped(lines, &item.notice.message, width, Style::default());
         }
         TimelineItem::Error(item) => {
-            lines.push(label(" ERROR ", DANGER, item.header.status));
+            lines.push(label(" ERROR ", model.theme.danger(), item.header.status));
             push_wrapped(
                 lines,
                 &item.error.message,
                 width,
-                Style::default().fg(DANGER),
+                Style::default().fg(model.theme.danger()),
             );
         }
     }
@@ -395,7 +413,11 @@ fn render_inspector(frame: &mut Frame<'_>, area: Rect, model: &Model) {
     frame.render_widget(
         Tabs::new(titles)
             .select(selected)
-            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .fg(model.theme.accent())
+                    .add_modifier(Modifier::BOLD),
+            )
             .divider("·")
             .block(Block::default().borders(Borders::ALL).title(" Inspector ")),
         rows[0],
@@ -438,7 +460,9 @@ fn inspector_lines(model: &Model) -> Vec<Line<'static>> {
             if let Some(diagnosis) = &session.diagnosis {
                 lines.push(Line::styled(
                     "Diagnosis",
-                    Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(model.theme.success())
+                        .add_modifier(Modifier::BOLD),
                 ));
                 lines.push(Line::raw(diagnosis.statement.clone()));
                 lines.push(Line::raw(format!(
@@ -461,7 +485,11 @@ fn inspector_lines(model: &Model) -> Vec<Line<'static>> {
                 vec![
                     Line::styled(
                         format!("[{}] {}", action.id, action.summary),
-                        Style::default().fg(if action.replayable { SUCCESS } else { WARNING }),
+                        Style::default().fg(if action.replayable {
+                            model.theme.success()
+                        } else {
+                            model.theme.warning()
+                        }),
                     ),
                     Line::styled(
                         format!("  {} · cwd {}", action.kind, action.cwd),
@@ -478,9 +506,13 @@ fn inspector_lines(model: &Model) -> Vec<Line<'static>> {
                     Line::styled(
                         format!("{:?} {}", trial.classification, trial.id),
                         Style::default().fg(match trial.classification {
-                            fixtrace_protocol::TrialClassification::StablePass => SUCCESS,
-                            fixtrace_protocol::TrialClassification::StableFail => DANGER,
-                            _ => WARNING,
+                            fixtrace_protocol::TrialClassification::StablePass => {
+                                model.theme.success()
+                            }
+                            fixtrace_protocol::TrialClassification::StableFail => {
+                                model.theme.danger()
+                            }
+                            _ => model.theme.warning(),
                         }),
                     ),
                     Line::raw(format!(
@@ -500,7 +532,7 @@ fn inspector_lines(model: &Model) -> Vec<Line<'static>> {
                 lines.push(Line::styled(
                     format!("[{}] {}", node.action_id, node.label),
                     Style::default().fg(if node.in_minimal_set {
-                        SUCCESS
+                        model.theme.success()
                     } else {
                         Color::White
                     }),
@@ -531,9 +563,9 @@ fn inspector_lines(model: &Model) -> Vec<Line<'static>> {
                         Line::styled(
                             line.to_owned(),
                             Style::default().fg(if line.starts_with('+') {
-                                SUCCESS
+                                model.theme.success()
                             } else if line.starts_with('-') {
-                                DANGER
+                                model.theme.danger()
                             } else {
                                 Color::Gray
                             }),
@@ -583,6 +615,7 @@ fn inspector_lines(model: &Model) -> Vec<Line<'static>> {
             )),
         ],
         InspectorTab::Settings => vec![
+            Line::raw(format!("Theme       {}", model.theme.label())),
             Line::raw(format!(
                 "Provider    {}",
                 model.initialized.config_summary.provider
@@ -644,7 +677,7 @@ fn timeline_artifacts(item: &TimelineItem) -> &[fixtrace_protocol::ArtifactSumma
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, model: &Model) {
     let style = if model.offline {
-        Style::default().fg(DANGER)
+        Style::default().fg(model.theme.danger())
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -681,7 +714,7 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, model: &Model, modal: &Modal)
         Modal::Help => {
             let popup = centered(area, 76, 78);
             frame.render_widget(Clear, popup);
-            let text = "Keys\n  Enter send · Alt+Enter/Ctrl+J newline · bracketed paste supported\n  Ctrl+P palette · Ctrl+O sessions · Ctrl+B sidebar · Ctrl+I inspector\n  Tab/Shift+Tab inspector · PageUp/PageDown scroll · g/G top/bottom\n  Ctrl+C cancels active task; press again within 1.5s to exit\n\nCommands\n  /analyze /diagnose /cancel /demo /actions /trials /graph /diff\n  /artifacts /usage /config /export /open /help /quit\n\nEsc or Enter closes this help.";
+            let text = "Keys\n  Enter send/steer · Alt+Enter/Ctrl+J newline · Ctrl+X $EDITOR\n  Ctrl+P palette · Ctrl+N new · Ctrl+O sessions · Ctrl+B sidebar\n  Ctrl+I inspector · Tab panels/reference completion · x expand Tool\n  PageUp/PageDown scroll · g/G top/bottom · bracketed paste supported\n  Ctrl+C cancels active task; press again within 1.5s to exit\n\nWorkflow\n  /new /fork /archive /record /verify /replay /analyze /diagnose\n  /repeat /cancel /demo /actions /trials /graph /diff /artifacts\n  /usage /model /effort /permissions /config /export /import /theme\n\nType @ to reference an Action, Trial, or Artifact. Esc/Enter closes.";
             frame.render_widget(
                 Paragraph::new(text)
                     .block(Block::default().borders(Borders::ALL).title(" Help "))
@@ -709,11 +742,11 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, model: &Model, modal: &Modal)
             frame.render_widget(Clear, popup);
             frame.render_widget(
                 Paragraph::new(error.clone())
-                    .style(Style::default().fg(DANGER))
+                    .style(Style::default().fg(model.theme.danger()))
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(DANGER))
+                            .border_style(Style::default().fg(model.theme.danger()))
                             .title(" Error · Esc close "),
                     )
                     .wrap(Wrap { trim: false }),
@@ -747,7 +780,9 @@ fn render_palette(frame: &mut Frame<'_>, area: Rect, model: &Model, modal: bool)
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{:<14}", command.name),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(model.theme.accent())
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(command.description),
             ]))
@@ -758,6 +793,44 @@ fn render_palette(frame: &mut Frame<'_>, area: Rect, model: &Model, modal: bool)
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Commands · type to filter · Enter run "),
+        ),
+        popup,
+    );
+}
+
+fn render_references(frame: &mut Frame<'_>, area: Rect, model: &Model, query: &str) {
+    let suggestions = model.reference_suggestions(query);
+    let height = u16::try_from(suggestions.len().clamp(1, 10) + 2).unwrap_or(12);
+    let popup = Rect {
+        x: area.x.saturating_add(2),
+        y: area.bottom().saturating_sub(height + 6),
+        width: area.width.saturating_sub(4).min(88),
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    let items = if suggestions.is_empty() {
+        vec![ListItem::new("No matching Action, Trial, or Artifact")]
+    } else {
+        suggestions
+            .into_iter()
+            .map(|(token, label)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{token:<48}"),
+                        Style::default()
+                            .fg(model.theme.accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(label),
+                ]))
+            })
+            .collect()
+    };
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" References · Tab complete "),
         ),
         popup,
     );
@@ -779,7 +852,9 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, model: &Model, id: uuid::U
             vec![
                 Line::styled(
                     request.title.clone(),
-                    Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(model.theme.warning())
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Line::raw(format!("Why       {}", request.reason)),
                 Line::raw(format!("Risk      {:?}", request.risk)),
@@ -808,7 +883,7 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, model: &Model, id: uuid::U
                 Line::raw(""),
                 Line::styled(
                     "y once · t task · s equivalent/session · n deny · c cancel task",
-                    Style::default().fg(ACCENT),
+                    Style::default().fg(model.theme.accent()),
                 ),
             ]
         },
@@ -818,7 +893,7 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, model: &Model, id: uuid::U
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(WARNING))
+                    .border_style(Style::default().fg(model.theme.warning()))
                     .title(" Approval required "),
             )
             .wrap(Wrap { trim: false }),

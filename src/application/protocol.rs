@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs, path::Path};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -6,12 +6,12 @@ use fixtrace_presenter::{SessionViewInput, present_session};
 use fixtrace_protocol::{
     ActionListResponse, AgentMessageDelta, AgentMessageItem, AppErrorView, AppEvent, AppRequest,
     AppResponsePayload, ArtifactSummary, ConfigValue, ConnectionTestResponse, DependencyGraphView,
-    DiffView, EmptyRequest, EntityKind, EntityRef, ErrorCode, EventBatch, EventEnvelope,
-    InitializeRequest, InitializeResponse, ItemDelta, ItemStatus, Notice, NoticeLevel,
-    PROTOCOL_VERSION, PageInfo, PublicConfigSummary, ServerCapabilities, SessionListResponse,
-    SessionSnapshot, SubscriptionStarted, TaskFailure, TaskInput, TaskProgress, TaskResult,
-    TaskStatus, TaskSummary, TimelineItem, TimelineItemHeader, ToolCallItem, TrialItem,
-    TrialListResponse, UserMessageItem,
+    DiffFileView, DiffView, EmptyRequest, EntityKind, EntityRef, ErrorCode, EventBatch,
+    EventEnvelope, InitializeRequest, InitializeResponse, ItemDelta, ItemStatus, Notice,
+    NoticeLevel, PROTOCOL_VERSION, PageInfo, PublicConfigSummary, ServerCapabilities,
+    SessionListResponse, SessionSnapshot, SubscriptionStarted, TaskFailure, TaskInput,
+    TaskProgress, TaskResult, TaskStatus, TaskSummary, TimelineItem, TimelineItemHeader,
+    ToolCallItem, TrialItem, TrialListResponse, UserMessageItem,
 };
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +21,7 @@ use crate::{
     agent::diagnosis::Diagnosis,
     application::{AppCommand, AppResponse, FixTraceAppService, FixTraceApplication},
     config::FixTraceConfig,
+    domain::snapshot::SnapshotManifest,
     error::AppError,
     llm::usage::UsageSummary as CoreUsageSummary,
     minimize::engine::MinimizationReport,
@@ -115,6 +116,7 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                     .execute(AppCommand::InitializeSession {
                         project: request.project,
                         oracle: request.oracle,
+                        title: request.title,
                     })
                     .await
                     .map_err(app_error_view)?
@@ -129,6 +131,35 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                 let detail = self.session_detail(request.session_id).await?;
                 Ok(AppResponsePayload::Session(
                     self.protocol_session_summary(&detail.session)?,
+                ))
+            }
+            AppRequest::SessionFork(request) => {
+                let AppResponse::SessionChanged { session } = self
+                    .execute(AppCommand::ForkSession {
+                        session_id: request.session_id,
+                        title: request.title,
+                    })
+                    .await
+                    .map_err(app_error_view)?
+                else {
+                    return Err(invariant_error());
+                };
+                Ok(AppResponsePayload::Session(
+                    self.protocol_session_summary(&session)?,
+                ))
+            }
+            AppRequest::SessionArchive(request) => {
+                let AppResponse::SessionChanged { session } = self
+                    .execute(AppCommand::ArchiveSession {
+                        session_id: request.session_id,
+                    })
+                    .await
+                    .map_err(app_error_view)?
+                else {
+                    return Err(invariant_error());
+                };
+                Ok(AppResponsePayload::Session(
+                    self.protocol_session_summary(&session)?,
                 ))
             }
             AppRequest::SessionGetSnapshot(request) => self
@@ -147,10 +178,62 @@ impl FixTraceProtocolApplication for FixTraceAppService {
             AppRequest::TaskCancel(request) => self
                 .cancel_task(request.task_id)
                 .map(AppResponsePayload::Task),
-            AppRequest::TaskSteer(_) => Err(AppErrorView::new(
-                ErrorCode::InvalidTransition,
-                "the current task does not accept steering",
-            )),
+            AppRequest::TaskSteer(request) => {
+                if request.message.trim().is_empty() {
+                    return Err(AppErrorView::new(
+                        ErrorCode::InvalidRequest,
+                        "steering message cannot be empty",
+                    ));
+                }
+                let task = self
+                    .event_store
+                    .load_task(request.task_id)
+                    .map_err(store_error_view)?;
+                if !task.supports_steer || task.status.is_terminal() {
+                    return Err(AppErrorView::new(
+                        ErrorCode::InvalidTransition,
+                        "the current task does not accept steering",
+                    ));
+                }
+                self.task_steers
+                    .lock()
+                    .map_err(|_| invariant_error())?
+                    .get(&task.id)
+                    .ok_or_else(|| {
+                        AppErrorView::new(
+                            ErrorCode::NotFound,
+                            "task steering channel was not found",
+                        )
+                    })?
+                    .send(request.message.clone())
+                    .map_err(|_| {
+                        AppErrorView::new(
+                            ErrorCode::InvalidTransition,
+                            "task stopped before steering was delivered",
+                        )
+                    })?;
+                if let Some(session_id) = task.session_id {
+                    self.publish(
+                        Some(session_id),
+                        Some(task.id),
+                        AppEvent::ItemCompleted(TimelineItem::UserMessage(UserMessageItem {
+                            header: timeline_header(
+                                Uuid::new_v4(),
+                                ItemStatus::Completed,
+                                Some(EntityRef {
+                                    kind: EntityKind::Task,
+                                    id: task.id.to_string(),
+                                }),
+                            ),
+                            text: request.message,
+                        })),
+                    )
+                    .map_err(app_error_view)?;
+                }
+                Ok(AppResponsePayload::Accepted {
+                    message: "Steering queued for the active task".to_owned(),
+                })
+            }
             AppRequest::ActionList(request) => {
                 let detail = self.session_detail(request.session_id).await?;
                 let actions: Vec<_> = detail
@@ -192,6 +275,34 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                     .map(presentation::trial_view)
                     .map(AppResponsePayload::Trial)
                     .ok_or_else(|| AppErrorView::new(ErrorCode::NotFound, "trial was not found"))
+            }
+            AppRequest::TrialRun(request) => {
+                let AppResponse::TrialCompleted { trial, .. } = self
+                    .execute(AppCommand::RunCandidate {
+                        session_id: request.session_id,
+                        action_ids: Some(request.action_ids),
+                        repetitions: None,
+                    })
+                    .await
+                    .map_err(app_error_view)?
+                else {
+                    return Err(invariant_error());
+                };
+                Ok(AppResponsePayload::Trial(presentation::trial_view(&trial)))
+            }
+            AppRequest::TrialRepeat(request) => {
+                let AppResponse::TrialCompleted { trial, .. } = self
+                    .execute(AppCommand::RepeatTrial {
+                        session_id: request.session_id,
+                        trial_id: request.trial_id,
+                        repetitions: request.repetitions,
+                    })
+                    .await
+                    .map_err(app_error_view)?
+                else {
+                    return Err(invariant_error());
+                };
+                Ok(AppResponsePayload::Trial(presentation::trial_view(&trial)))
             }
             AppRequest::DependencyGetGraph(request) => {
                 let detail = self.session_detail(request.session_id).await?;
@@ -367,12 +478,7 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                 )
                 .await
                 .map(AppResponsePayload::Task),
-            AppRequest::SessionFork(_)
-            | AppRequest::SessionArchive(_)
-            | AppRequest::SessionDelete(_)
-            | AppRequest::TrialRun(_)
-            | AppRequest::TrialRepeat(_)
-            | AppRequest::ArtifactRead(_) => Err(AppErrorView::new(
+            AppRequest::SessionDelete(_) | AppRequest::ArtifactRead(_) => Err(AppErrorView::new(
                 ErrorCode::InvalidRequest,
                 "request is defined by the protocol but is not enabled in this milestone",
             )),
@@ -487,6 +593,23 @@ impl FixTraceAppService {
             .event_store
             .active_task_for_session(session_id)
             .map_err(store_error_view)?;
+        let diff = if detail.session.worktree_path.is_dir() {
+            snapshot_diff_view(
+                &detail.session.baseline_manifest,
+                &SnapshotManifest::capture(
+                    &detail.session.worktree_path,
+                    config.replay.include_target,
+                )
+                .map_err(app_error_view)?,
+                &detail.session.baseline_path,
+                &detail.session.worktree_path,
+            )
+        } else {
+            DiffView {
+                files: Vec::new(),
+                truncated: false,
+            }
+        };
         Ok(SessionSnapshot {
             stream_id,
             through_sequence: batch.high_watermark,
@@ -504,10 +627,7 @@ impl FixTraceAppService {
                 usage: presentation::usage_view(&usage, &config),
                 approvals: Vec::new(),
                 dependency_graph,
-                diff: DiffView {
-                    files: Vec::new(),
-                    truncated: false,
-                },
+                diff,
             }),
         })
     }
@@ -553,7 +673,7 @@ impl FixTraceAppService {
             finished_at: None,
             progress_ratio: None,
             is_cancellable: true,
-            supports_steer: false,
+            supports_steer: task_supports_steer(&input),
         };
         if let Err(error) = self.event_store.save_task(&task) {
             if let Some(session_id) = session_id
@@ -563,6 +683,15 @@ impl FixTraceAppService {
             }
             return Err(store_error_view(error));
         }
+        let (steer_sender, steer_receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.task_steers
+            .lock()
+            .map_err(|_| invariant_error())?
+            .insert(task_id, steer_sender);
+        self.task_steer_receivers
+            .lock()
+            .map_err(|_| invariant_error())?
+            .insert(task_id, steer_receiver);
         if let (Some(session_id), TaskInput::AgentTurn { prompt }) = (session_id, &input) {
             self.publish(
                 Some(session_id),
@@ -685,6 +814,12 @@ impl FixTraceAppService {
         }
         if let Ok(mut tasks) = self.task_cancellations.lock() {
             tasks.remove(&queued.id);
+        }
+        if let Ok(mut steers) = self.task_steers.lock() {
+            steers.remove(&queued.id);
+        }
+        if let Ok(mut receivers) = self.task_steer_receivers.lock() {
+            receivers.remove(&queued.id);
         }
         if let Some(session_id) = queued.session_id
             && let Ok(mut sessions) = self.session_tasks.lock()
@@ -902,6 +1037,40 @@ fn task_command(session_id: Option<Uuid>, input: TaskInput) -> Result<AppCommand
             no_llm: false,
             prompt: Some(prompt),
         }),
+        TaskInput::VerifyBaseline => Ok(AppCommand::RunCandidate {
+            session_id: session_id.ok_or_else(|| {
+                AppErrorView::new(ErrorCode::InvalidRequest, "verification requires a session")
+            })?,
+            action_ids: Some(Vec::new()),
+            repetitions: None,
+        }),
+        TaskInput::ReplayFullTrace => Ok(AppCommand::RunCandidate {
+            session_id: session_id.ok_or_else(|| {
+                AppErrorView::new(ErrorCode::InvalidRequest, "replay requires a session")
+            })?,
+            action_ids: None,
+            repetitions: None,
+        }),
+        TaskInput::RepeatTrial { trial_id } => Ok(AppCommand::RepeatTrial {
+            session_id: session_id.ok_or_else(|| {
+                AppErrorView::new(ErrorCode::InvalidRequest, "trial repeat requires a session")
+            })?,
+            trial_id,
+            repetitions: None,
+        }),
+        TaskInput::GenerateDiagnosis { prompt } => Ok(AppCommand::AnalyzeSession {
+            session_id: session_id.ok_or_else(|| {
+                AppErrorView::new(ErrorCode::InvalidRequest, "diagnosis requires a session")
+            })?,
+            no_llm: false,
+            prompt,
+        }),
+        TaskInput::RecordTrace { line } => Ok(AppCommand::RecordLine {
+            session_id: session_id.ok_or_else(|| {
+                AppErrorView::new(ErrorCode::InvalidRequest, "recording requires a session")
+            })?,
+            line,
+        }),
         TaskInput::ExportSession { output } => Ok(AppCommand::ExportSession {
             session_id: session_id.ok_or_else(|| {
                 AppErrorView::new(ErrorCode::InvalidRequest, "export requires a session")
@@ -909,17 +1078,13 @@ fn task_command(session_id: Option<Uuid>, input: TaskInput) -> Result<AppCommand
             output,
         }),
         TaskInput::Demo { no_llm } => Ok(AppCommand::RunDemo { no_llm }),
-        _ => Err(AppErrorView::new(
-            ErrorCode::InvalidRequest,
-            "task kind is defined but is not enabled in this milestone",
-        )),
     }
 }
 
 fn task_title(input: &TaskInput) -> &'static str {
     match input {
         TaskInput::AgentTurn { .. } => "Agent turn",
-        TaskInput::RecordTrace => "Record repair trace",
+        TaskInput::RecordTrace { .. } => "Record repair action",
         TaskInput::VerifyBaseline => "Verify baseline",
         TaskInput::ReplayFullTrace => "Replay full trace",
         TaskInput::AnalyzeMinimalTrace { .. } => "Analyze minimal trace",
@@ -928,6 +1093,15 @@ fn task_title(input: &TaskInput) -> &'static str {
         TaskInput::ExportSession { .. } => "Export session",
         TaskInput::Demo { .. } => "Run demo",
     }
+}
+
+fn task_supports_steer(input: &TaskInput) -> bool {
+    matches!(
+        input,
+        TaskInput::AgentTurn { .. }
+            | TaskInput::AnalyzeMinimalTrace { no_llm: false }
+            | TaskInput::GenerateDiagnosis { .. }
+    )
 }
 
 fn paginate<T>(
@@ -976,7 +1150,79 @@ fn public_config(config: &FixTraceConfig) -> PublicConfigSummary {
         oracle_timeout_secs: config.replay.oracle_timeout_secs,
         has_api_key: std::env::var(&config.model.api_key_env)
             .is_ok_and(|value| !value.trim().is_empty()),
-        approval_policy: fixtrace_protocol::ApprovalPolicy::AskForOpaque,
+        approval_policy: config.approval.policy.clone(),
+    }
+}
+
+fn snapshot_diff_view(
+    before: &SnapshotManifest,
+    after: &SnapshotManifest,
+    baseline_root: &Path,
+    worktree_root: &Path,
+) -> DiffView {
+    const MAX_DIFF_FILES: usize = 500;
+    let delta = before.diff(after);
+    let mut files = BTreeMap::<std::path::PathBuf, Vec<&'static str>>::new();
+    for path in delta.created {
+        files.entry(path).or_default().push("created");
+    }
+    for path in delta.deleted {
+        files.entry(path).or_default().push("deleted");
+    }
+    for path in delta.content_modified {
+        files.entry(path).or_default().push("content_modified");
+    }
+    for path in delta.permission_modified {
+        files.entry(path).or_default().push("permission_modified");
+    }
+    let truncated = files.len() > MAX_DIFF_FILES;
+    DiffView {
+        files: files
+            .into_iter()
+            .take(MAX_DIFF_FILES)
+            .map(|(path, kinds)| DiffFileView {
+                path: path.to_string_lossy().into_owned(),
+                change_kind: kinds.join("+"),
+                unified_diff: unified_text_diff(baseline_root, worktree_root, &path),
+                artifact_id: None,
+            })
+            .collect(),
+        truncated,
+    }
+}
+
+fn unified_text_diff(
+    baseline_root: &Path,
+    worktree_root: &Path,
+    relative: &Path,
+) -> Option<String> {
+    const MAX_INPUT_BYTES: usize = 256 * 1_024;
+    const MAX_OUTPUT_BYTES: usize = 512 * 1_024;
+    let read_text = |root: &Path| match fs::read(root.join(relative)) {
+        Ok(bytes) if bytes.len() <= MAX_INPUT_BYTES => String::from_utf8(bytes).ok(),
+        Ok(_) | Err(_) => None,
+    };
+    let before = read_text(baseline_root).unwrap_or_default();
+    let after = read_text(worktree_root).unwrap_or_default();
+    if before.is_empty() && after.is_empty() {
+        return None;
+    }
+    let label = relative.to_string_lossy();
+    let rendered = similar::TextDiff::from_lines(&before, &after)
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{label}"), &format!("b/{label}"))
+        .to_string();
+    if rendered.len() <= MAX_OUTPUT_BYTES {
+        Some(rendered)
+    } else {
+        let boundary = rendered
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= MAX_OUTPUT_BYTES)
+            .last()
+            .unwrap_or(0);
+        Some(format!("{}\n… diff truncated …", &rendered[..boundary]))
     }
 }
 

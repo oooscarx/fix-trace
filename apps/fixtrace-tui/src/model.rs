@@ -2,8 +2,9 @@ use std::{collections::HashSet, path::PathBuf, time::Instant};
 
 use crossterm::event::Event;
 use fixtrace_protocol::{
-    AppErrorView, AppEvent, ApprovalChoice, EventEnvelope, InitializeResponse, SessionSnapshot,
-    SessionSummary, SessionView, TaskInput, TaskSummary, TimelineItem,
+    AppErrorView, AppEvent, ApprovalChoice, ConfigValue, EventEnvelope, InitializeResponse,
+    PublicConfigSummary, SessionSnapshot, SessionSummary, SessionView, TaskInput, TaskSummary,
+    TimelineItem,
 };
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -16,6 +17,55 @@ use uuid::Uuid;
 pub enum ConnectionMode {
     InProcess,
     WebSocket(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Theme {
+    Color,
+    HighContrast,
+    Monochrome,
+}
+
+impl Theme {
+    pub const fn accent(self) -> Color {
+        match self {
+            Self::Color => Color::Cyan,
+            Self::HighContrast => Color::LightBlue,
+            Self::Monochrome => Color::White,
+        }
+    }
+
+    pub const fn success(self) -> Color {
+        match self {
+            Self::Color => Color::Green,
+            Self::HighContrast => Color::LightGreen,
+            Self::Monochrome => Color::White,
+        }
+    }
+
+    pub const fn warning(self) -> Color {
+        match self {
+            Self::Color => Color::Yellow,
+            Self::HighContrast => Color::LightYellow,
+            Self::Monochrome => Color::Gray,
+        }
+    }
+
+    pub const fn danger(self) -> Color {
+        match self {
+            Self::Color => Color::Red,
+            Self::HighContrast => Color::LightRed,
+            Self::Monochrome => Color::DarkGray,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Color => "color",
+            Self::HighContrast => "high-contrast",
+            Self::Monochrome => "mono",
+        }
+    }
 }
 
 impl ConnectionMode {
@@ -89,6 +139,17 @@ pub enum Modal {
 #[derive(Clone, Debug)]
 pub enum Effect {
     LoadSessions,
+    CreateSession {
+        project: PathBuf,
+        oracle: String,
+        title: Option<String>,
+    },
+    ForkSession {
+        session_id: Uuid,
+        title: Option<String>,
+    },
+    ArchiveSession(Uuid),
+    ImportSession(PathBuf),
     OpenSession(Uuid),
     Subscribe {
         session_id: Uuid,
@@ -96,6 +157,10 @@ pub enum Effect {
     },
     SendMessage {
         session_id: Uuid,
+        text: String,
+    },
+    SteerTask {
+        task_id: Uuid,
         text: String,
     },
     StartTask {
@@ -111,12 +176,21 @@ pub enum Effect {
         session_id: Uuid,
         output: PathBuf,
     },
+    UpdateConfig {
+        key: String,
+        value: ConfigValue,
+    },
+    EditPrompt(String),
 }
 
 #[derive(Clone, Debug)]
 pub enum EffectResult {
     Sessions(Vec<SessionSummary>),
+    Session(SessionSummary),
+    Imported(Uuid),
     Snapshot(Box<SessionSnapshot>),
+    Config(PublicConfigSummary),
+    Edited(String),
     Task(TaskSummary),
     Accepted(String),
     Exported(PathBuf),
@@ -158,6 +232,7 @@ pub struct Model {
     pub scroll: u16,
     pub last_ctrl_c: Option<Instant>,
     pub viewport: (u16, u16),
+    pub theme: Theme,
 }
 
 impl Model {
@@ -169,7 +244,7 @@ impl Model {
             selected_session_id: None,
             session: None,
             last_sequence: 0,
-            composer: configured_composer(),
+            composer: configured_composer(Theme::Color),
             input_history: Vec::new(),
             history_index: None,
             inspector_tab: InspectorTab::Overview,
@@ -185,6 +260,7 @@ impl Model {
             scroll: 0,
             last_ctrl_c: None,
             viewport: (120, 36),
+            theme: Theme::Color,
         }
     }
 
@@ -200,14 +276,65 @@ impl Model {
 
     pub fn take_composer(&mut self) -> String {
         let text = self.composer_text().trim().to_owned();
-        self.composer = configured_composer();
+        self.composer = configured_composer(self.theme);
         self.history_index = None;
         text
     }
 
     pub fn replace_composer(&mut self, text: &str) {
-        self.composer = configured_composer();
+        self.composer = configured_composer(self.theme);
         self.composer.insert_str(text);
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        let text = self.composer_text();
+        self.theme = theme;
+        self.composer = configured_composer(theme);
+        self.composer.insert_str(text);
+    }
+
+    pub fn reference_query(&self) -> Option<&str> {
+        let line = self.composer.lines().last()?;
+        if line.chars().last().is_some_and(char::is_whitespace) {
+            return None;
+        }
+        line.split_whitespace()
+            .last()
+            .filter(|query| query.starts_with('@'))
+    }
+
+    pub fn reference_suggestions(&self, query: &str) -> Vec<(String, String)> {
+        let needle = query.trim_start_matches('@').to_ascii_lowercase();
+        let mut suggestions = Vec::new();
+        if let Some(session) = &self.session {
+            for action in &session.actions {
+                suggestions.push((
+                    format!("@action:{}", action.id),
+                    format!("Action {} · {}", action.id, action.summary),
+                ));
+            }
+            for trial in &session.trials {
+                suggestions.push((
+                    format!("@trial:{}", trial.id),
+                    format!("Trial {} · {}", trial.id, trial.trial_summary),
+                ));
+            }
+            for item in &session.timeline {
+                for artifact in timeline_artifacts(item) {
+                    suggestions.push((
+                        format!("@artifact:{}", artifact.id),
+                        format!("Artifact {} · {}", artifact.id, artifact.name),
+                    ));
+                }
+            }
+        }
+        suggestions.retain(|(token, label)| {
+            needle.is_empty()
+                || token.to_ascii_lowercase().contains(&needle)
+                || label.to_ascii_lowercase().contains(&needle)
+        });
+        suggestions.truncate(10);
+        suggestions
     }
 
     pub fn upsert_timeline(&mut self, item: TimelineItem) {
@@ -321,7 +448,7 @@ impl Model {
     }
 }
 
-fn configured_composer() -> TextArea<'static> {
+fn configured_composer(theme: Theme) -> TextArea<'static> {
     let mut composer = TextArea::default();
     composer.set_block(
         Block::default()
@@ -334,9 +461,28 @@ fn configured_composer() -> TextArea<'static> {
     composer.set_cursor_style(
         Style::default()
             .fg(Color::Black)
-            .bg(Color::Cyan)
+            .bg(theme.accent())
             .add_modifier(Modifier::BOLD),
     );
     composer.set_cursor_line_style(Style::default());
     composer
+}
+
+fn timeline_artifacts(item: &TimelineItem) -> &[fixtrace_protocol::ArtifactSummary] {
+    match item {
+        TimelineItem::UserMessage(item) => &item.header.artifacts,
+        TimelineItem::AgentMessage(item) => &item.header.artifacts,
+        TimelineItem::PlanSummary(item) => &item.header.artifacts,
+        TimelineItem::ToolCall(item) => &item.header.artifacts,
+        TimelineItem::CommandExecution(item) => &item.header.artifacts,
+        TimelineItem::FilePatch(item) => &item.header.artifacts,
+        TimelineItem::RecordedAction(item) => &item.header.artifacts,
+        TimelineItem::Trial(item) => &item.header.artifacts,
+        TimelineItem::Minimization(item) => &item.header.artifacts,
+        TimelineItem::Diagnosis(item) => &item.header.artifacts,
+        TimelineItem::Approval(item) => &item.header.artifacts,
+        TimelineItem::Usage(item) => &item.header.artifacts,
+        TimelineItem::Notice(item) => &item.header.artifacts,
+        TimelineItem::Error(item) => &item.header.artifacts,
+    }
 }

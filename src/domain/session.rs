@@ -32,6 +32,10 @@ impl SessionStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionRecord {
     pub id: Uuid,
+    #[serde(default)]
+    pub parent_session_id: Option<Uuid>,
+    #[serde(default)]
+    pub archived: bool,
     pub project_name: String,
     pub original_project: PathBuf,
     pub baseline_path: PathBuf,

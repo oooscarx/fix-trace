@@ -32,7 +32,11 @@ pub async fn run(cli: Cli, cancellation: CancellationToken) -> Result<(), AppErr
 
 fn command_from_cli(command: Command) -> Result<AppCommand, AppError> {
     Ok(match command {
-        Command::Init { project, oracle } => AppCommand::InitializeSession { project, oracle },
+        Command::Init { project, oracle } => AppCommand::InitializeSession {
+            project,
+            oracle,
+            title: None,
+        },
         Command::Shell { session_id } => AppCommand::RunControlledShell {
             session_id: parse_session_id(&session_id)?,
         },
@@ -75,6 +79,10 @@ fn render_response(response: AppResponse) -> Result<(), AppError> {
             println!("next: fixtrace shell {}", session.id);
         }
         AppResponse::ControlledShellCompleted { .. } => {}
+        AppResponse::RecordingUpdated {
+            session_id,
+            message,
+        } => println!("recording {session_id}: {message}"),
         AppResponse::SessionAnalyzed { result } => {
             println!(
                 "{}",
@@ -89,6 +97,18 @@ fn render_response(response: AppResponse) -> Result<(), AppError> {
                     "diagnosis": result.diagnosis,
                     "agent": result.agent,
                     "llm_mode": result.llm_mode,
+                }))?
+            );
+        }
+        AppResponse::SessionChanged { session } => {
+            println!("session_id={}", session.id);
+        }
+        AppResponse::TrialCompleted { session_id, trial } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "session_id": session_id,
+                    "trial": trial,
                 }))?
             );
         }
