@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use serde_json::Value;
+
 #[test]
 fn bundled_demo_replays_from_failure_to_success() {
     let output = Command::new(env!("CARGO_BIN_EXE_fixtrace"))
@@ -13,7 +15,17 @@ fn bundled_demo_replays_from_failure_to_success() {
         output.status.success(),
         "demo failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(stdout.contains("\"baseline_outcome\": \"stable_fail\""));
-    assert!(stdout.contains("\"full_outcome\": \"stable_pass\""));
-    assert!(stdout.contains("\"action_ids\": ["));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("demo should emit JSON");
+    assert_eq!(report["baseline_outcome"], "stable_fail");
+    assert_eq!(report["full_outcome"], "stable_pass");
+    assert_eq!(report["final_outcome"], "stable_pass");
+    assert_eq!(report["minimal_action_ids"], serde_json::json!([5, 6]));
+    assert_eq!(report["ablations"].as_array().map(Vec::len), Some(2));
+    assert!(
+        report["ablations"]
+            .as_array()
+            .expect("ablations should be an array")
+            .iter()
+            .all(|ablation| ablation["outcome"] == "stable_fail")
+    );
 }

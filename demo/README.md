@@ -11,5 +11,4 @@ Its Oracle is:
 cargo test --test acceptance
 ```
 
-M1 adds a nine-action trace whose complete replay repairs the fixture. M2 minimizes that trace to the configuration replacement and `chmod` actions.
-
+The bundled nine-action trace repairs the fixture. Dependency-aware ddmin plus final per-action ablation reduces it to actions 5 and 6: the configuration replacement and `chmod` actions.

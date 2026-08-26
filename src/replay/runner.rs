@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::PathBuf, time::Instant};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +55,22 @@ impl TrialRunner {
 
     pub fn baseline_hash(&self) -> &str {
         &self.baseline_hash
+    }
+
+    pub fn baseline(&self) -> &Path {
+        &self.baseline
+    }
+
+    pub fn include_target(&self) -> bool {
+        self.include_target
+    }
+
+    pub fn oracle(&self) -> &OracleSpec {
+        &self.oracle
+    }
+
+    pub fn repetitions(&self) -> u32 {
+        self.repetitions
     }
 
     pub async fn run(

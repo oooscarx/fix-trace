@@ -54,6 +54,9 @@ pub enum AppError {
     #[error("demo verification failed: {0}")]
     DemoVerification(String),
 
+    #[error("minimization failed: {0}")]
+    Minimization(String),
+
     #[error("the `{0}` command is planned but not implemented in this milestone")]
     NotImplemented(String),
 }

@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::{
     domain::{action::Action, trial::TrialOutcome},
     error::AppError,
+    minimize::engine::{AblationEvidence, minimize},
     replay::{oracle::OracleSpec, runner::TrialRunner},
 };
 
@@ -25,8 +26,12 @@ struct DemoReport {
     baseline_outcome: TrialOutcome,
     full_trial_id: Uuid,
     full_outcome: TrialOutcome,
-    action_ids: Vec<u64>,
-    statement: &'static str,
+    minimal_action_ids: Vec<u64>,
+    final_trial_id: Uuid,
+    final_outcome: TrialOutcome,
+    ablations: Vec<AblationEvidence>,
+    trial_count: usize,
+    statement: String,
 }
 
 pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(), AppError> {
@@ -34,43 +39,50 @@ pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(
     let project = demo_project_path();
     let runner = TrialRunner::new(project, trace.oracle, trace.repetitions, false)?;
 
-    let baseline = runner.run(&[], &cancellation).await?;
-    if baseline.outcome == TrialOutcome::Cancelled {
+    let report = match minimize(&runner, &trace.actions, &cancellation).await {
+        Ok(report) => report,
+        Err(_) if cancellation.is_cancelled() => return print_cancelled(),
+        Err(error) => return Err(error),
+    };
+    if report.empty_trial.outcome == TrialOutcome::Cancelled {
         return print_cancelled();
     }
-    if baseline.outcome != TrialOutcome::StableFail {
+    if report.minimal_action_ids != [5, 6] {
         return Err(AppError::DemoVerification(format!(
-            "empty trace must be StableFail, got {:?}",
-            baseline.outcome
+            "expected minimal actions [5, 6], got {:?}",
+            report.minimal_action_ids
         )));
     }
-
-    let full = runner.run(&trace.actions, &cancellation).await?;
-    if full.outcome == TrialOutcome::Cancelled {
-        return print_cancelled();
+    if report.ablations.len() != 2
+        || report
+            .ablations
+            .iter()
+            .any(|ablation| ablation.outcome != TrialOutcome::StableFail)
+    {
+        return Err(AppError::DemoVerification(
+            "both final action ablations must be StableFail".to_owned(),
+        ));
     }
-    if full.outcome != TrialOutcome::StablePass {
-        return Err(AppError::DemoVerification(format!(
-            "full trace must be StablePass, got {:?}",
-            full.outcome
-        )));
-    }
 
-    let report = DemoReport {
+    let output = DemoReport {
         mode: if no_llm {
             "offline-no-llm"
         } else {
             "deterministic-core-only"
         },
         baseline_hash: runner.baseline_hash().to_owned(),
-        baseline_trial_id: baseline.id,
-        baseline_outcome: baseline.outcome,
-        full_trial_id: full.id,
-        full_outcome: full.outcome,
-        action_ids: full.action_ids,
-        statement: "The complete trace is replay-sufficient for this baseline and Oracle; minimization is added in M2.",
+        baseline_trial_id: report.empty_trial.id,
+        baseline_outcome: report.empty_trial.outcome,
+        full_trial_id: report.full_trial.id,
+        full_outcome: report.full_trial.outcome,
+        minimal_action_ids: report.minimal_action_ids,
+        final_trial_id: report.final_trial.id,
+        final_outcome: report.final_trial.outcome,
+        ablations: report.ablations,
+        trial_count: report.trials.len(),
+        statement: report.statement,
     };
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 

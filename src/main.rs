@@ -3,6 +3,7 @@ mod config;
 mod demo;
 mod domain;
 mod error;
+mod minimize;
 mod replay;
 mod sandbox;
 
