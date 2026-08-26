@@ -173,11 +173,7 @@ where
         })?;
         let assistant = ChatMessage::text(MessageRole::Assistant, content.clone());
         history.record("messages", &serde_json::to_value(&assistant)?)?;
-        let mut diagnosis: Diagnosis = serde_json::from_str(&content).map_err(|error| {
-            AppError::Agent(format!(
-                "final diagnosis is not valid Diagnosis JSON: {error}"
-            ))
-        })?;
+        let mut diagnosis = parse_diagnosis(&content)?;
         diagnosis.validate()?;
         tools.validate_diagnosis(&diagnosis)?;
         diagnosis.usage = usage.clone();
@@ -208,9 +204,48 @@ fn initial_messages() -> Vec<ChatMessage> {
         ),
         ChatMessage::text(
             MessageRole::User,
-            "Analyze the verified repair trace. Use tools before concluding. Return only Diagnosis JSON with fields: statement, minimal_action_ids, evidence[{claim,classification,action_ids,trial_ids}], limitations, usage. Valid classifications: necessary, removable, uncertain, untested, non_replayable.",
+            "Analyze the verified repair trace. Use tools before concluding. Return only one bare Diagnosis JSON object (no Markdown fence or prose) with fields: statement (string), minimal_action_ids (integer array), evidence (array of {claim, classification, action_ids, trial_ids}), limitations (string array), and usage (object; FixTrace replaces it with measured API usage). Valid classifications: necessary, removable, uncertain, untested, non_replayable.",
         ),
     ]
+}
+
+fn parse_diagnosis(content: &str) -> Result<Diagnosis, AppError> {
+    let source = strip_json_fence(content).unwrap_or_else(|| content.trim());
+    let mut value: Value = serde_json::from_str(source).map_err(|error| {
+        AppError::Agent(format!(
+            "final diagnosis is not valid Diagnosis JSON: {error}"
+        ))
+    })?;
+
+    if let Some(object) = value.as_object_mut() {
+        // Usage is security- and budget-sensitive accounting. Never trust the
+        // model's self-report; run_agent replaces it with provider observations.
+        object.remove("usage");
+        if let Some(limitations) = object.get_mut("limitations")
+            && limitations.is_string()
+        {
+            let limitation = limitations.take();
+            *limitations = Value::Array(vec![limitation]);
+        }
+    }
+
+    serde_json::from_value(value).map_err(|error| {
+        AppError::Agent(format!(
+            "final diagnosis is not valid Diagnosis JSON: {error}"
+        ))
+    })
+}
+
+fn strip_json_fence(content: &str) -> Option<&str> {
+    let fenced = content.trim().strip_prefix("```")?;
+    let fenced = fenced
+        .strip_prefix("json")
+        .or_else(|| fenced.strip_prefix("JSON"))
+        .unwrap_or(fenced);
+    let fenced = fenced
+        .strip_prefix("\r\n")
+        .or_else(|| fenced.strip_prefix('\n'))?;
+    fenced.strip_suffix("```").map(str::trim)
 }
 
 fn stopped(usage: UsageSummary, steps: usize, stop_reason: AgentStopReason) -> AgentRunResult {
@@ -258,7 +293,7 @@ mod tests {
         replay::oracle::OracleSpec,
     };
 
-    use super::{AgentHistory, AgentStopReason, run_agent};
+    use super::{AgentHistory, AgentStopReason, parse_diagnosis, run_agent};
 
     struct FakeTools;
 
@@ -373,6 +408,32 @@ mod tests {
                 .len()
                 >= 5
         );
+    }
+
+    #[test]
+    fn parses_fenced_diagnosis_and_uses_runtime_usage_instead_of_model_claims() {
+        let trial_id = Uuid::new_v4();
+        let content = format!(
+            r#"```json
+{{
+  "statement": "dependency-constrained 1-minimal sufficient repair trace",
+  "minimal_action_ids": [1],
+  "evidence": [{{
+    "claim": "Action 1 is necessary",
+    "classification": "necessary",
+    "action_ids": [1],
+    "trial_ids": ["{trial_id}"]
+  }}],
+  "limitations": "Scoped to the recorded baseline",
+  "usage": {{"calls": 999999}}
+}}
+```"#
+        );
+
+        let diagnosis = parse_diagnosis(&content).expect("fenced diagnosis should parse");
+
+        assert_eq!(diagnosis.limitations, ["Scoped to the recorded baseline"]);
+        assert_eq!(diagnosis.usage, UsageSummary::default());
     }
 
     fn known_usage() -> UsageObservation {
