@@ -1,0 +1,19 @@
+[package]
+name = "fixtrace-store"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Versioned SQLite event and task store for FixTrace"
+license = "MIT"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+fixtrace-protocol = { path = "../fixtrace-protocol" }
+rusqlite = { version = "0.37", features = ["backup", "bundled"] }
+serde = "1.0"
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3.23"

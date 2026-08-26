@@ -16,9 +16,12 @@ use crate::{
 /// All stateful operations are submitted through `FixTraceApplication`; this
 /// module only maps clap types, renders progress, and preserves legacy stdout.
 pub async fn run(cli: Cli, cancellation: CancellationToken) -> Result<(), AppError> {
+    let initialize_event_store =
+        !matches!(cli.command, Command::Config { .. } | Command::Demo { .. });
     let options = AppServiceOptions {
         state_dir: cli.state_dir,
         config_path: cli.config,
+        initialize_event_store,
     };
     let command = command_from_cli(cli.command)?;
     let service = FixTraceAppService::start(options, cancellation)?;

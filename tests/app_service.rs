@@ -21,6 +21,7 @@ async fn app_service_is_the_stateful_entry_point_used_without_cli_types() {
         AppServiceOptions {
             state_dir: Some(state_dir),
             config_path: None,
+            initialize_event_store: true,
         },
         CancellationToken::new(),
     )
@@ -79,4 +80,50 @@ async fn app_service_is_the_stateful_entry_point_used_without_cli_types() {
         }
     }
     assert!(saw_created, "App Service should publish workflow progress");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn app_service_runs_independent_sessions_concurrently() {
+    let temp = tempdir().unwrap();
+    let service = FixTraceAppService::start(
+        AppServiceOptions {
+            state_dir: Some(temp.path().join("state")),
+            config_path: None,
+            initialize_event_store: true,
+        },
+        CancellationToken::new(),
+    )
+    .unwrap();
+    service
+        .execute(AppCommand::SetConfig {
+            key: "replay.repetitions".to_owned(),
+            value: "1".to_owned(),
+        })
+        .await
+        .unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    fs::write(first.join("fixture.txt"), "first").unwrap();
+    fs::write(second.join("fixture.txt"), "second").unwrap();
+
+    let started = std::time::Instant::now();
+    let (first_result, second_result) = tokio::join!(
+        service.execute(AppCommand::InitializeSession {
+            project: first,
+            oracle: "sleep 1; false".to_owned(),
+        }),
+        service.execute(AppCommand::InitializeSession {
+            project: second,
+            oracle: "sleep 1; false".to_owned(),
+        }),
+    );
+    first_result.expect("first session should initialize");
+    second_result.expect("second session should initialize");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1_800),
+        "independent sessions were serialized instead of running concurrently"
+    );
 }

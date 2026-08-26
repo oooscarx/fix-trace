@@ -29,6 +29,9 @@ pub enum AppError {
     #[error("history database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    #[error(transparent)]
+    EventStore(#[from] fixtrace_store::StoreError),
+
     #[error("failed to walk project tree: {0}")]
     WalkDirectory(#[from] walkdir::Error),
 

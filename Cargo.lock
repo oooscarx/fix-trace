@@ -360,6 +360,9 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "fixtrace-presenter",
+ "fixtrace-protocol",
+ "fixtrace-store",
  "hex",
  "nix",
  "reqwest",
@@ -380,6 +383,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fixtrace-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fixtrace",
+ "fixtrace-protocol",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "fixtrace-presenter"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fixtrace-protocol",
+ "uuid",
+]
+
+[[package]]
 name = "fixtrace-protocol"
 version = "0.1.0"
 dependencies = [
@@ -389,6 +415,20 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "fixtrace-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fixtrace-protocol",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "uuid",
 ]
 

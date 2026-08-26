@@ -37,7 +37,8 @@ impl OpenAiCompatibleProvider {
                 config.api_key_env
             ))
         })?;
-        if api_key.trim().is_empty() {
+        let api_key = api_key.trim().to_owned();
+        if api_key.is_empty() {
             return Err(AppError::Llm(format!(
                 "API key environment variable `{}` is empty",
                 config.api_key_env
@@ -191,11 +192,28 @@ fn message_json(message: &ChatMessage) -> Value {
 }
 
 fn chat_completions_endpoint(endpoint: &str) -> String {
-    let endpoint = endpoint.trim_end_matches('/');
+    let endpoint = endpoint.trim().trim_end_matches('/');
     if endpoint.ends_with("/chat/completions") {
         endpoint.to_owned()
     } else {
         format!("{endpoint}/chat/completions")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chat_completions_endpoint;
+
+    #[test]
+    fn endpoint_whitespace_and_trailing_slashes_are_normalized() {
+        assert_eq!(
+            chat_completions_endpoint(" https://example.test/v1/ "),
+            "https://example.test/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_endpoint("https://example.test/v1/chat/completions"),
+            "https://example.test/v1/chat/completions"
+        );
     }
 }
 

@@ -1,6 +1,7 @@
 pub mod renderer;
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -48,19 +49,38 @@ pub enum ProgressEvent {
 #[derive(Clone)]
 pub struct ProgressSender {
     sender: broadcast::Sender<ProgressEvent>,
+    observer: Option<ProgressObserver>,
 }
+
+type ProgressObserver = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
 
 impl ProgressSender {
     pub fn channel(capacity: usize) -> (Self, broadcast::Receiver<ProgressEvent>) {
         let (sender, receiver) = broadcast::channel(capacity);
-        (Self { sender }, receiver)
+        (
+            Self {
+                sender,
+                observer: None,
+            },
+            receiver,
+        )
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ProgressEvent> {
         self.sender.subscribe()
     }
 
+    pub fn with_observer(&self, observer: impl Fn(&ProgressEvent) + Send + Sync + 'static) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            observer: Some(Arc::new(observer)),
+        }
+    }
+
     pub fn emit(&self, event: ProgressEvent) {
+        if let Some(observer) = &self.observer {
+            observer(&event);
+        }
         let _ignored = self.sender.send(event);
     }
 }

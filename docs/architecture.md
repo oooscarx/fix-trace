@@ -7,8 +7,9 @@ flowchart LR
     U[CLI compatibility adapter] --> AS[FixTrace App Service]
     FT[Future TUI / GUI / Server] -. same interface .-> AS
     AS --> W[Session Workflow]
-    AS --> H[(SQLite History)]
-    AS --> E[Progress broadcast]
+    AS --> H[(SQLite core history)]
+    AS --> ES[(Versioned event/task store)]
+    AS --> E[Persisted event + live broadcast]
     W --> S[Snapshot + Local Copy Sandbox]
     W --> R[Replay / Oracle / Trial]
     R --> M[Dependency Graph + ddmin + Ablation]
@@ -22,6 +23,7 @@ flowchart LR
     R --> E
     A --> E
     H --> X[Redacted JSON Export / Import]
+    ES --> E
 ```
 
 ## 数据流
@@ -84,7 +86,21 @@ AppCommand -> bounded mpsc -> AppServiceActor -> workflow/store/provider
 ProgressEvent <- broadcast -----------+
 ```
 
-Actor 持有 StatePaths、当前配置、CancellationToken 和 progress publisher。配置写入和 Session 命令在同一个应用边界内排序；调用者收到结构化 `AppResponse`，CLI 才负责打印。U2 会将这里的内部命令/进度桥接到持久化协议事件和每 Session task supervisor。
+Actor 持有 StatePaths、当前配置、CancellationToken 和 event publisher。配置写入和 Session 命令在同一个应用边界内排序；调用者收到结构化 `AppResponse`，CLI 才负责打印。
+
+U2 已加入协议入口和 task supervisor：
+
+```text
+InProcess client
+  -> initialize_protocol / execute_protocol
+  -> FixTraceAppService
+  -> schema v2 EventStore transaction
+  -> persisted EventEnvelope(sequence)
+  -> bounded live broadcast
+  -> catch-up + live merge in EventSubscription
+```
+
+每个 Session 最多一个 mutation task；Task 有独立 CancellationToken，运行中的命令/Trial 能由 `task/cancel` 触发清理。事件先持久化再 broadcast，订阅者用 sequence 去重，慢订阅者进入 EventGap/snapshot 恢复，而不是拖住任务。
 
 受控 shell 暂时作为兼容命令由 App Service 启动，因而旧脚本无行为变化；未来 TUI/GUI 不复用其 stdin/stdout 循环，而使用 U2 的类型化 message/action 命令。
 
@@ -102,4 +118,8 @@ Actor 持有 StatePaths、当前配置、CancellationToken 和 progress publishe
 | `agent` | 受限工具、Agent Loop、停止条件、Diagnosis 校验 |
 | `application` | 统一 `AppCommand`/`AppResponse`、有界命令队列和 App Service actor |
 | `app` | clap 类型到应用命令的兼容映射与 CLI 输出渲染 |
-| `progress` | App Service progress broadcast 与 CLI 渲染；U2 将升级为持久化事件流 |
+| `fixtrace-protocol` | `fixtrace/1` 的 request/response/event/timeline/approval/view 与 TS 生成 |
+| `fixtrace-store` | 显式 migration、Task/Approval/Event 持久化与 catch-up |
+| `fixtrace-presenter` | Rust 共享派生字段和人类可读 summary |
+| `fixtrace-client` | transport-neutral AppClient 与 InProcess catch-up/live 合并 |
+| `progress` | 旧工作流进度兼容层；通过 observer 映射为持久化 AppEvent |

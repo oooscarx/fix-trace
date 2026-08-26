@@ -1,10 +1,14 @@
 use std::process::Command;
 
 use serde_json::Value;
+use tempfile::tempdir;
 
 #[test]
 fn bundled_demo_replays_from_failure_to_success() {
+    let state = tempdir().expect("temporary state directory should be created");
     let output = Command::new(env!("CARGO_BIN_EXE_fixtrace"))
+        .args(["--state-dir"])
+        .arg(state.path())
         .args(["demo", "--no-llm"])
         .output()
         .expect("fixtrace demo should start");
@@ -27,5 +31,9 @@ fn bundled_demo_replays_from_failure_to_success() {
             .expect("ablations should be an array")
             .iter()
             .all(|ablation| ablation["outcome"] == "stable_fail")
+    );
+    assert!(
+        !state.path().join("history.sqlite3").exists(),
+        "standalone demo should not migrate or create persistent history"
     );
 }

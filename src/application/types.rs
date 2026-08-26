@@ -11,10 +11,21 @@ use crate::{
     minimize::engine::MinimizationReport,
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AppServiceOptions {
     pub state_dir: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
+    pub initialize_event_store: bool,
+}
+
+impl Default for AppServiceOptions {
+    fn default() -> Self {
+        Self {
+            state_dir: None,
+            config_path: None,
+            initialize_event_store: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

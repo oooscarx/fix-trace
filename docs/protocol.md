@@ -82,6 +82,8 @@ pub struct EventEnvelope {
 
 订阅传 `after_sequence`。服务端先读取持久化 catch-up，再接 live buffer。如果无法连续补发则返回 `EventGap`，客户端必须调用 `session/get_snapshot`，不能把缺失事件猜成最终状态。
 
+InProcess transport 已实现相同语义：先注册有界 live receiver，再读取订阅时的 SQLite high watermark，最后按 sequence 合并并去重，因此 catch-up 与 live 之间没有竞态窗口。客户端未 initialize 时拒绝请求；同一 `operation_id` 的 Task 重试返回原 Task。
+
 ## Timeline 与可显示内容
 
 Timeline item 是结构化 tagged enum，不是大段 Markdown。每项有稳定 ID、状态、起止时间、父项、artifact 和实体引用。类型包括：
@@ -103,6 +105,8 @@ Policy 为 `read_only`、`ask_always`、`ask_for_opaque`、`auto_recorded_safe`�
 ## 共享 Presentation Model
 
 `SessionView` 同时包含 summary、active task、timeline、actions、trials、diagnosis、usage、approvals、dependency graph 和 diff。后端负责 `classification`、`confidence`、`budget_ratio`、`progress_ratio`、`is_cancellable`、`can_rerun`、`can_approve` 及人类可读 summary；客户端只决定布局、颜色和交互。
+
+上述派生位于独立 `fixtrace-presenter` crate；协议 DTO 不依赖内部领域对象，App Service 负责从 Action/Trial/Diagnosis/Usage 转换。
 
 ## TypeScript 生成
 

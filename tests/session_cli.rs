@@ -14,6 +14,17 @@ fn init_history_export_and_import_work_through_cli() {
     fs::write(project.join("fixture.txt"), "broken")
         .expect("fixture project file should be written");
 
+    let config = run(&["--state-dir", path(&source_state), "config", "show"]);
+    assert!(
+        config.status.success(),
+        "config failed: {}",
+        stderr(&config)
+    );
+    assert!(
+        !source_state.join("history.sqlite3").exists(),
+        "read-only config command should not migrate or create history"
+    );
+
     let initialized = run(&[
         "--state-dir",
         path(&source_state),

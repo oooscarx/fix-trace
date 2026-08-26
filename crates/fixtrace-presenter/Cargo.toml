@@ -1,0 +1,12 @@
+[package]
+name = "fixtrace-presenter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Shared Rust presentation model derivation for FixTrace clients"
+license = "MIT"
+
+[dependencies]
+chrono = "0.4"
+fixtrace-protocol = { path = "../fixtrace-protocol" }
+uuid = "1.18"
