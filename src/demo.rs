@@ -29,8 +29,8 @@ struct DemoTrace {
     actions: Vec<Action>,
 }
 
-#[derive(Debug, Serialize)]
-struct DemoReport {
+#[derive(Clone, Debug, Serialize)]
+pub struct DemoReport {
     mode: &'static str,
     baseline_hash: String,
     baseline_trial_id: Uuid,
@@ -47,18 +47,28 @@ struct DemoReport {
     agent: Option<AgentRunResult>,
 }
 
-pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(), AppError> {
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum DemoOutput {
+    Completed(Box<DemoReport>),
+    Cancelled { outcome: &'static str },
+}
+
+pub async fn run_demo(
+    no_llm: bool,
+    cancellation: CancellationToken,
+) -> Result<DemoOutput, AppError> {
     let trace = load_demo_trace()?;
     let project = demo_project_path();
     let runner = TrialRunner::new(project, trace.oracle, trace.repetitions, false)?;
 
     let report = match minimize(&runner, &trace.actions, &cancellation).await {
         Ok(report) => report,
-        Err(_) if cancellation.is_cancelled() => return print_cancelled(),
+        Err(_) if cancellation.is_cancelled() => return Ok(cancelled()),
         Err(error) => return Err(error),
     };
     if report.empty_trial.outcome == TrialOutcome::Cancelled {
-        return print_cancelled();
+        return Ok(cancelled());
     }
     if report.minimal_action_ids != [5, 6] {
         return Err(AppError::DemoVerification(format!(
@@ -127,7 +137,7 @@ pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(
         (diagnosis, Some(run))
     };
 
-    let output = DemoReport {
+    Ok(DemoOutput::Completed(Box::new(DemoReport {
         mode: if no_llm {
             "offline-no-llm"
         } else {
@@ -146,9 +156,7 @@ pub async fn run_demo(no_llm: bool, cancellation: CancellationToken) -> Result<(
         statement: report.statement,
         diagnosis,
         agent,
-    };
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(())
+    })))
 }
 
 fn mock_usage() -> UsageObservation {
@@ -171,7 +179,8 @@ fn demo_project_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("demo/broken-project")
 }
 
-fn print_cancelled() -> Result<(), AppError> {
-    println!(r#"{{"outcome":"cancelled"}}"#);
-    Ok(())
+const fn cancelled() -> DemoOutput {
+    DemoOutput::Cancelled {
+        outcome: "cancelled",
+    }
 }

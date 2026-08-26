@@ -1,7 +1,7 @@
 pub mod renderer;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::domain::trial::TrialOutcome;
@@ -47,16 +47,20 @@ pub enum ProgressEvent {
 
 #[derive(Clone)]
 pub struct ProgressSender {
-    sender: mpsc::Sender<ProgressEvent>,
+    sender: broadcast::Sender<ProgressEvent>,
 }
 
 impl ProgressSender {
-    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<ProgressEvent>) {
-        let (sender, receiver) = mpsc::channel(capacity);
+    pub fn channel(capacity: usize) -> (Self, broadcast::Receiver<ProgressEvent>) {
+        let (sender, receiver) = broadcast::channel(capacity);
         (Self { sender }, receiver)
     }
 
+    pub fn subscribe(&self) -> broadcast::Receiver<ProgressEvent> {
+        self.sender.subscribe()
+    }
+
     pub fn emit(&self, event: ProgressEvent) {
-        let _ignored = self.sender.try_send(event);
+        let _ignored = self.sender.send(event);
     }
 }

@@ -4,14 +4,17 @@
 
 ```mermaid
 flowchart LR
-    U[CLI / Controlled REPL] --> W[Session Workflow]
+    U[CLI compatibility adapter] --> AS[FixTrace App Service]
+    FT[Future TUI / GUI / Server] -. same interface .-> AS
+    AS --> W[Session Workflow]
+    AS --> H[(SQLite History)]
+    AS --> E[Progress broadcast]
     W --> S[Snapshot + Local Copy Sandbox]
     W --> R[Replay / Oracle / Trial]
     R --> M[Dependency Graph + ddmin + Ablation]
     M --> T[Restricted Agent Tools]
     T --> A[Agent Loop]
     A --> P[OpenAI-compatible or Mock Provider]
-    W --> H[(SQLite History)]
     R --> H
     M --> H
     A --> H
@@ -27,6 +30,7 @@ flowchart LR
 sequenceDiagram
     participant User
     participant CLI
+    participant App as App Service Actor
     participant Recorder
     participant TrialRunner
     participant Minimizer
@@ -34,24 +38,29 @@ sequenceDiagram
     participant DB as SQLite
 
     User->>CLI: init(project, Oracle)
-    CLI->>TrialRunner: empty candidate × repetitions
-    TrialRunner-->>CLI: StableFail + baseline hash
-    CLI->>DB: session + baseline trial
+    CLI->>App: InitializeSession
+    App->>TrialRunner: empty candidate × repetitions
+    TrialRunner-->>App: StableFail + baseline hash
+    App->>DB: session + baseline trial
+    App-->>CLI: SessionInitialized
     User->>Recorder: commands / edits / env / cwd
     Recorder->>DB: ordered Actions + deltas + outputs
     User->>Recorder: :done
     Recorder->>TrialRunner: complete trace from fresh baselines
     TrialRunner-->>Recorder: StablePass
     User->>CLI: analyze(session)
-    CLI->>Minimizer: actions + hard dependency graph
+    CLI->>App: AnalyzeSession
+    App->>Minimizer: actions + hard dependency graph
     loop candidate experiments
         Minimizer->>TrialRunner: dependency-closed candidate
         TrialRunner-->>Minimizer: StablePass/Fail/Flaky/Unresolved
     end
     Minimizer->>DB: trials + ablations + final validation
-    CLI->>Agent: evidence-only tools
+    App->>Agent: evidence-only tools
     Agent->>DB: messages + tool calls + Usage + Diagnosis
-    Agent-->>User: structured evidence-bound diagnosis
+    Agent-->>App: structured evidence-bound diagnosis
+    App-->>CLI: SessionAnalyzed
+    CLI-->>User: compatible JSON rendering
 ```
 
 ## 关键不变量
@@ -63,6 +72,21 @@ sequenceDiagram
 5. 最终集合经过逐项消融和一次绕过 cache 的重复验证。
 6. Provider 不持久化 API Key；Token 不可得时记录 Unknown 而非估造精确数值。
 7. Agent 的 `run_candidate` 只接受当前 Session 已存在的 Action ID。
+8. 客户端不直接打开数据库或调用 replay/minimize/Agent；所有状态操作先进入 App Service。
+
+## App Service 边界（U1）
+
+根 package 同时提供 library 和 `fixtrace` binary。`main.rs` 只负责 clap、tracing 和 Ctrl+C；`app.rs` 是保留原输出的 CLI adapter。状态操作由 `FixTraceApplication` 接口统一提交给 `FixTraceAppService`：
+
+```text
+AppCommand -> bounded mpsc -> AppServiceActor -> workflow/store/provider
+                                      |
+ProgressEvent <- broadcast -----------+
+```
+
+Actor 持有 StatePaths、当前配置、CancellationToken 和 progress publisher。配置写入和 Session 命令在同一个应用边界内排序；调用者收到结构化 `AppResponse`，CLI 才负责打印。U2 会将这里的内部命令/进度桥接到持久化协议事件和每 Session task supervisor。
+
+受控 shell 暂时作为兼容命令由 App Service 启动，因而旧脚本无行为变化；未来 TUI/GUI 不复用其 stdin/stdout 循环，而使用 U2 的类型化 message/action 命令。
 
 ## 主要模块
 
@@ -76,5 +100,6 @@ sequenceDiagram
 | `history` | SQLite schema、artifact、脱敏导入导出 |
 | `llm` | Provider trait、OpenAI-compatible HTTP、Mock、Usage/费用 |
 | `agent` | 受限工具、Agent Loop、停止条件、Diagnosis 校验 |
-| `progress` | 有界 mpsc 事件通道与 CLI 渲染 |
-
+| `application` | 统一 `AppCommand`/`AppResponse`、有界命令队列和 App Service actor |
+| `app` | clap 类型到应用命令的兼容映射与 CLI 输出渲染 |
+| `progress` | App Service progress broadcast 与 CLI 渲染；U2 将升级为持久化事件流 |

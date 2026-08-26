@@ -74,6 +74,12 @@ pub enum AppError {
 
     #[error("Agent stopped: {0}")]
     Agent(String),
+
+    #[error("FixTrace App Service is unavailable")]
+    ServiceUnavailable,
+
+    #[error("FixTrace App Service invariant failed: {0}")]
+    ServiceInvariant(String),
 }
 
 impl AppError {

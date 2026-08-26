@@ -1,11 +1,17 @@
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{sync::broadcast, task::JoinHandle};
 
 use super::ProgressEvent;
 
-pub fn spawn(mut receiver: mpsc::Receiver<ProgressEvent>) -> JoinHandle<()> {
+pub fn spawn(mut receiver: broadcast::Receiver<ProgressEvent>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(event) = receiver.recv().await {
-            render(&event);
+        loop {
+            match receiver.recv().await {
+                Ok(event) => render(&event),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    eprintln!("[fixtrace] progress receiver lagged; skipped {skipped} updates");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
         }
     })
 }

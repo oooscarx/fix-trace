@@ -1,21 +1,5 @@
-mod agent;
-mod app;
-mod cli;
-mod config;
-mod demo;
-mod domain;
-mod error;
-mod history;
-mod llm;
-mod minimize;
-mod progress;
-mod replay;
-mod sandbox;
-mod workflow;
-
 use clap::Parser;
-use cli::Cli;
-use error::AppError;
+use fixtrace::{app, cli::Cli, error::AppError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -50,4 +34,3 @@ fn init_tracing(verbose: bool) {
         .without_time()
         .init();
 }
-mod recorder;
