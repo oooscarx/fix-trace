@@ -1,0 +1,24 @@
+[package]
+name = "fixtrace-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "FixTrace Tauri desktop client"
+license = "MIT"
+
+[lib]
+name = "fixtrace_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+fixtrace = { path = "../../.." }
+fixtrace-client = { path = "../../../crates/fixtrace-client" }
+fixtrace-protocol = { path = "../../../crates/fixtrace-protocol" }
+fixtrace-server = { path = "../../fixtrace-server" }
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2.11.5", features = [] }
+tokio = { version = "1.47", features = ["macros", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }

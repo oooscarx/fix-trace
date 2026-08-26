@@ -11,6 +11,7 @@ members = [
     ".",
     "apps/fixtrace-server",
     "apps/fixtrace-tui",
+    "apps/fixtrace-desktop/src-tauri",
     "crates/fixtrace-client",
     "crates/fixtrace-presenter",
     "crates/fixtrace-protocol",

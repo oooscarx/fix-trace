@@ -2,3 +2,9 @@ target/
 /.fixtrace/
 *.profraw
 .DS_Store
+node_modules/
+apps/fixtrace-desktop/dist/
+apps/fixtrace-desktop/test-results/
+apps/fixtrace-desktop/playwright-report/
+apps/fixtrace-desktop/src-tauri/gen/
+*.tsbuildinfo
