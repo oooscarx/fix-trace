@@ -1,5 +1,4 @@
-/target/
+target/
 /.fixtrace/
 *.profraw
 .DS_Store
-
