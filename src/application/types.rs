@@ -30,16 +30,37 @@ impl Default for AppServiceOptions {
 
 #[derive(Clone, Debug)]
 pub enum AppCommand {
-    InitializeSession { project: PathBuf, oracle: String },
-    RunControlledShell { session_id: Uuid },
-    AnalyzeSession { session_id: Uuid, no_llm: bool },
-    GetSession { session_id: Uuid },
+    InitializeSession {
+        project: PathBuf,
+        oracle: String,
+    },
+    RunControlledShell {
+        session_id: Uuid,
+    },
+    AnalyzeSession {
+        session_id: Uuid,
+        no_llm: bool,
+        prompt: Option<String>,
+    },
+    GetSession {
+        session_id: Uuid,
+    },
     ListSessions,
-    ExportSession { session_id: Uuid, output: PathBuf },
-    ImportSession { input: PathBuf },
+    ExportSession {
+        session_id: Uuid,
+        output: PathBuf,
+    },
+    ImportSession {
+        input: PathBuf,
+    },
     GetConfig,
-    SetConfig { key: String, value: String },
-    RunDemo { no_llm: bool },
+    SetConfig {
+        key: String,
+        value: String,
+    },
+    RunDemo {
+        no_llm: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]

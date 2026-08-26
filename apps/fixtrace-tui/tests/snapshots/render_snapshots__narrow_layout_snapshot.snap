@@ -1,0 +1,30 @@
+---
+source: apps/fixtrace-tui/tests/render_snapshots.rs
+expression: "rendered(72, 26, InspectorTab::Graph)"
+---
+┌──────────────────────────────────────────────────────────────────────┐
+│FixTrace  parser-repair  glm-5 · medium · AskForOpaque · task Running │
+└──────────────────────────────────────────────────────────────────────┘
+┌ Inspector ───────────────────────────────────────────────────────────┐
+│ Overview · Actions · Trials · Graph · Diff · Artifacts · Usage · Sett│
+└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│Resource dependency / experimental attribution                        │
+│[5] edit parser configuration                                         │
+│  └─▶ [9] writes config read by test                                  │
+│[6] restore executable permission                                     │
+│  └─▶ [9] permission required by test                                 │
+│[9] run acceptance test                                               │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+┌ Message · Enter send · Alt+Enter newline ────────────────────────────┐
+│ Ask FixTrace about the verified repair trace, or type /              │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+ CONNECTED Oracle attempt 2/3  ·  Ctrl+P commands  Tab inspector  Ctrl+C

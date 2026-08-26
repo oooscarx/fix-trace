@@ -186,6 +186,15 @@ cargo run -p fixtrace-server -- \
 
 WebSocket 默认只允许 loopback，token 不进入 URL、日志、数据库或导出。协议、认证、重连和多客户端说明见 [App Server 文档](docs/app-server.md)。
 
+## TUI
+
+```bash
+cargo run -p fixtrace-tui
+cargo run -p fixtrace-tui -- --session <session-id>
+```
+
+TUI 通过 App Service 执行真实 Session/Agent/Trial/Cancel 工作流，支持流式 timeline、响应式 Sidebar/Inspector、多行输入、Slash Commands 和安全终端恢复。使用方式见 [TUI 文档](docs/tui.md)。
+
 ## 测试与质量检查
 
 ```bash
@@ -214,6 +223,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 - [设计文档](docs/design.md)
 - [系统架构](docs/architecture.md)
 - [App Server](docs/app-server.md)
+- [TUI](docs/tui.md)
 - [UI 协议](docs/protocol.md)
 - [课程要求映射](docs/requirements-matrix.md)
 - [AI 开发开销空白模板](docs/development-cost-template.csv)

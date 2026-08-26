@@ -10,6 +10,7 @@ license = "MIT"
 members = [
     ".",
     "apps/fixtrace-server",
+    "apps/fixtrace-tui",
     "crates/fixtrace-client",
     "crates/fixtrace-presenter",
     "crates/fixtrace-protocol",

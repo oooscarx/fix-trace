@@ -1,0 +1,42 @@
+---
+source: apps/fixtrace-tui/tests/render_snapshots.rs
+expression: "rendered(140, 38, InspectorTab::Overview)"
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│FixTrace  parser-repair  glm-5 · medium · AskForOpaque · task Running · 1558 tok · $0.0032 · 16% · in-process · online                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Sessions ────────────┐┌ Transcript ────────────────────────────────────────────────────────────────┐┌ Inspector ─────────────────────────┐
+│▶ parser-repair • runn││ YOU  Completed                                                             ││ Overview · Actions · Trials · Graph│
+│  Analyzing · 08-26 12││Find the smallest verified repair and explain the evidence.                 │└────────────────────────────────────┘
+│  cli-timeout         ││                                                                            │┌────────────────────────────────────┐
+│  ReadyForAnalysis · 0││▶ TOOL run_candidate {"action_ids":[5,6]}                                   ││Project     parser-repair           │
+│                      ││                                                                            ││Status      Analyzing               │
+│                      ││ TRIAL  Completed                                                           ││Actions     2                       │
+│                      ││Trial 018 · StablePass 3/3 · 2.41s · actions [5, 6]                         ││Trials      1                       │
+│                      ││                                                                            ││Task        Agent turn · Running    │
+│                      ││ AGENT  Running                                                             ││                                    │
+│                      ││Actions 5 and 6 form the dependency-constrained 1-minimal sufficient        ││Diagnosis                           │
+│                      ││repair trace. Removing either action failed all repeated Oracle attempts.   ││Actions 5 and 6 are sufficient under│
+│                      ││                                                                            ││the recorded baseline and Oracle.   │
+│                      ││                                                                            ││Minimal: [5, 6]                     │
+│                      ││                                                                            ││Confidence: high                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+│                      ││                                                                            ││                                    │
+└──────────────────────┘└────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────┘
+┌ Message · Enter send · Alt+Enter newline ────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Ask FixTrace about the verified repair trace, or type /                                                                                  │
+│                                                                                                                                          │
+│                                                                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ CONNECTED Oracle attempt 2/3  ·  Ctrl+P commands  Tab inspector  Ctrl+C cancel/exit  ? help

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     agent::{
         diagnosis::Diagnosis,
-        loop_runner::{AgentHistory, run_agent},
+        loop_runner::{AgentHistory, run_agent_with_prompt},
         tools::AnalysisTools,
     },
     config::FixTraceConfig,
@@ -299,7 +299,11 @@ impl AppServiceWorker {
                 repl::run(database, &self.config, session_id, &cancellation, progress).await?;
                 Ok(AppResponse::ControlledShellCompleted { session_id })
             }
-            AppCommand::AnalyzeSession { session_id, no_llm } => {
+            AppCommand::AnalyzeSession {
+                session_id,
+                no_llm,
+                prompt,
+            } => {
                 let progress = self.progress_for(Some(session_id), task_id);
                 let report = analyze_session(
                     database,
@@ -324,7 +328,7 @@ impl AppServiceWorker {
                         Some(session_id),
                         cancellation.child_token(),
                     );
-                    let result = run_agent(
+                    let result = run_agent_with_prompt(
                         &provider,
                         &mut tools,
                         &self.config,
@@ -334,6 +338,7 @@ impl AppServiceWorker {
                             database: Some(database),
                             session_id: Some(session_id),
                         },
+                        prompt.as_deref(),
                     )
                     .await?;
                     if let Some(model_diagnosis) = &result.diagnosis {
@@ -346,6 +351,26 @@ impl AppServiceWorker {
                         Some(session_id),
                         &serde_json::to_value(&diagnosis)?,
                     )?;
+                    let item_id = Uuid::new_v4();
+                    let text = serde_json::to_string_pretty(&diagnosis)?;
+                    progress.emit(ProgressEvent::AgentMessageStarted { item_id });
+                    let mut chunk = String::new();
+                    for (index, character) in text.chars().enumerate() {
+                        chunk.push(character);
+                        if (index + 1) % 256 == 0 {
+                            progress.emit(ProgressEvent::AgentTextDelta {
+                                item_id,
+                                text_delta: std::mem::take(&mut chunk),
+                            });
+                        }
+                    }
+                    if !chunk.is_empty() {
+                        progress.emit(ProgressEvent::AgentTextDelta {
+                            item_id,
+                            text_delta: chunk,
+                        });
+                    }
+                    progress.emit(ProgressEvent::AgentMessageCompleted { item_id, text });
                 }
                 let llm_mode = if agent.is_some() {
                     "configured-provider"

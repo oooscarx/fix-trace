@@ -1,0 +1,16 @@
+---
+source: apps/fixtrace-tui/tests/render_snapshots.rs
+expression: "buffer_text(terminal.backend(), 52, 12)"
+---
+┌ FixTrace ────────────────────────────────────────┐
+│           FixTrace needs at least 60×16          │
+│              Current terminal: 52×12             │
+│            Resize to continue safely.            │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+└──────────────────────────────────────────────────┘

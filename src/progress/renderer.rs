@@ -42,6 +42,19 @@ fn render(event: &ProgressEvent) {
         ProgressEvent::AgentStepStarted { step } => {
             eprintln!("[fixtrace] agent step {step}");
         }
+        ProgressEvent::AgentMessageStarted { .. } => {
+            eprintln!("[fixtrace] agent response started");
+        }
+        ProgressEvent::AgentTextDelta { .. } => {}
+        ProgressEvent::AgentMessageCompleted { .. } => {
+            eprintln!("[fixtrace] agent response completed");
+        }
+        ProgressEvent::ToolCallStarted { name, .. } => {
+            eprintln!("[fixtrace] tool call started: {name}");
+        }
+        ProgressEvent::ToolCallCompleted { name, .. } => {
+            eprintln!("[fixtrace] tool call completed: {name}");
+        }
         ProgressEvent::UsageUpdated {
             input_tokens,
             output_tokens,

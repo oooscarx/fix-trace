@@ -4,13 +4,14 @@ use async_trait::async_trait;
 use chrono::Utc;
 use fixtrace_presenter::{SessionViewInput, present_session};
 use fixtrace_protocol::{
-    ActionListResponse, AppErrorView, AppEvent, AppRequest, AppResponsePayload, ArtifactSummary,
-    ConfigValue, ConnectionTestResponse, DependencyGraphView, DiffView, EmptyRequest, EntityKind,
-    EntityRef, ErrorCode, EventBatch, EventEnvelope, InitializeRequest, InitializeResponse,
-    ItemStatus, Notice, NoticeLevel, PROTOCOL_VERSION, PageInfo, PublicConfigSummary,
-    ServerCapabilities, SessionListResponse, SessionSnapshot, SubscriptionStarted, TaskFailure,
-    TaskInput, TaskProgress, TaskResult, TaskStatus, TaskSummary, TimelineItem, TimelineItemHeader,
-    TrialItem, TrialListResponse,
+    ActionListResponse, AgentMessageDelta, AgentMessageItem, AppErrorView, AppEvent, AppRequest,
+    AppResponsePayload, ArtifactSummary, ConfigValue, ConnectionTestResponse, DependencyGraphView,
+    DiffView, EmptyRequest, EntityKind, EntityRef, ErrorCode, EventBatch, EventEnvelope,
+    InitializeRequest, InitializeResponse, ItemDelta, ItemStatus, Notice, NoticeLevel,
+    PROTOCOL_VERSION, PageInfo, PublicConfigSummary, ServerCapabilities, SessionListResponse,
+    SessionSnapshot, SubscriptionStarted, TaskFailure, TaskInput, TaskProgress, TaskResult,
+    TaskStatus, TaskSummary, TimelineItem, TimelineItemHeader, ToolCallItem, TrialItem,
+    TrialListResponse, UserMessageItem,
 };
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -356,10 +357,19 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                     },
                 })
             }
+            AppRequest::MessageSend(request) => self
+                .start_task(
+                    operation_id,
+                    Some(request.session_id),
+                    TaskInput::AgentTurn {
+                        prompt: request.text,
+                    },
+                )
+                .await
+                .map(AppResponsePayload::Task),
             AppRequest::SessionFork(_)
             | AppRequest::SessionArchive(_)
             | AppRequest::SessionDelete(_)
-            | AppRequest::MessageSend(_)
             | AppRequest::TrialRun(_)
             | AppRequest::TrialRepeat(_)
             | AppRequest::ArtifactRead(_) => Err(AppErrorView::new(
@@ -543,7 +553,7 @@ impl FixTraceAppService {
             finished_at: None,
             progress_ratio: None,
             is_cancellable: true,
-            supports_steer: matches!(input, TaskInput::AgentTurn { .. }),
+            supports_steer: false,
         };
         if let Err(error) = self.event_store.save_task(&task) {
             if let Some(session_id) = session_id
@@ -552,6 +562,24 @@ impl FixTraceAppService {
                 sessions.remove(&session_id);
             }
             return Err(store_error_view(error));
+        }
+        if let (Some(session_id), TaskInput::AgentTurn { prompt }) = (session_id, &input) {
+            self.publish(
+                Some(session_id),
+                Some(task_id),
+                AppEvent::ItemCompleted(TimelineItem::UserMessage(UserMessageItem {
+                    header: timeline_header(
+                        Uuid::new_v4(),
+                        ItemStatus::Completed,
+                        Some(EntityRef {
+                            kind: EntityKind::Session,
+                            id: session_id.to_string(),
+                        }),
+                    ),
+                    text: prompt.clone(),
+                })),
+            )
+            .map_err(app_error_view)?;
         }
         let cancellation = self.cancellation.child_token();
         self.task_cancellations
@@ -732,7 +760,14 @@ pub(super) fn progress_event_payload(
             current,
             total,
         } => Some(AppEvent::ItemStarted(TimelineItem::Trial(TrialItem {
-            header: timeline_header(*trial_id, ItemStatus::Running),
+            header: timeline_header(
+                *trial_id,
+                ItemStatus::Running,
+                Some(EntityRef {
+                    kind: EntityKind::Trial,
+                    id: trial_id.to_string(),
+                }),
+            ),
             trial_id: *trial_id,
             action_ids: Vec::new(),
             classification: fixtrace_protocol::TrialClassification::Unresolved,
@@ -742,7 +777,14 @@ pub(super) fn progress_event_payload(
         }))),
         ProgressEvent::TrialCompleted { trial_id, outcome } => {
             Some(AppEvent::ItemCompleted(TimelineItem::Trial(TrialItem {
-                header: timeline_header(*trial_id, ItemStatus::Completed),
+                header: timeline_header(
+                    *trial_id,
+                    ItemStatus::Completed,
+                    Some(EntityRef {
+                        kind: EntityKind::Trial,
+                        id: trial_id.to_string(),
+                    }),
+                ),
                 trial_id: *trial_id,
                 action_ids: Vec::new(),
                 classification: presentation::trial_classification(outcome),
@@ -759,6 +801,60 @@ pub(super) fn progress_event_payload(
             "agent_step_started",
             format!("Agent step {step} started"),
         )),
+        ProgressEvent::AgentMessageStarted { item_id } => Some(AppEvent::ItemStarted(
+            TimelineItem::AgentMessage(AgentMessageItem {
+                header: timeline_header(*item_id, ItemStatus::Running, None),
+                text: String::new(),
+                public_reasoning_summary: None,
+            }),
+        )),
+        ProgressEvent::AgentTextDelta {
+            item_id,
+            text_delta,
+        } => Some(AppEvent::ItemDelta(ItemDelta::AgentMessage(
+            AgentMessageDelta {
+                item_id: *item_id,
+                text_delta: text_delta.clone(),
+            },
+        ))),
+        ProgressEvent::AgentMessageCompleted { item_id, text } => Some(AppEvent::ItemCompleted(
+            TimelineItem::AgentMessage(AgentMessageItem {
+                header: timeline_header(*item_id, ItemStatus::Completed, None),
+                text: text.clone(),
+                public_reasoning_summary: None,
+            }),
+        )),
+        ProgressEvent::ToolCallStarted {
+            item_id,
+            tool_call_id,
+            name,
+            arguments_summary,
+        } => Some(AppEvent::ItemStarted(TimelineItem::ToolCall(
+            ToolCallItem {
+                header: timeline_header(*item_id, ItemStatus::Running, None),
+                tool_call_id: tool_call_id.clone(),
+                name: name.clone(),
+                arguments_summary: arguments_summary.clone(),
+                result_summary: None,
+                selection_reason: None,
+            },
+        ))),
+        ProgressEvent::ToolCallCompleted {
+            item_id,
+            tool_call_id,
+            name,
+            arguments_summary,
+            result_summary,
+        } => Some(AppEvent::ItemCompleted(TimelineItem::ToolCall(
+            ToolCallItem {
+                header: timeline_header(*item_id, ItemStatus::Completed, None),
+                tool_call_id: tool_call_id.clone(),
+                name: name.clone(),
+                arguments_summary: arguments_summary.clone(),
+                result_summary: Some(result_summary.clone()),
+                selection_reason: None,
+            },
+        ))),
         ProgressEvent::UsageUpdated {
             input_tokens,
             output_tokens,
@@ -778,7 +874,7 @@ pub(super) fn progress_event_payload(
     }
 }
 
-fn timeline_header(id: Uuid, status: ItemStatus) -> TimelineItemHeader {
+fn timeline_header(id: Uuid, status: ItemStatus, entity: Option<EntityRef>) -> TimelineItemHeader {
     TimelineItemHeader {
         id,
         status,
@@ -786,10 +882,7 @@ fn timeline_header(id: Uuid, status: ItemStatus) -> TimelineItemHeader {
         completed_at: (status == ItemStatus::Completed).then(Utc::now),
         parent_id: None,
         artifacts: Vec::new(),
-        entities: vec![EntityRef {
-            kind: EntityKind::Trial,
-            id: id.to_string(),
-        }],
+        entities: entity.into_iter().collect(),
     }
 }
 
@@ -800,6 +893,14 @@ fn task_command(session_id: Option<Uuid>, input: TaskInput) -> Result<AppCommand
                 AppErrorView::new(ErrorCode::InvalidRequest, "analysis requires a session")
             })?,
             no_llm,
+            prompt: None,
+        }),
+        TaskInput::AgentTurn { prompt } => Ok(AppCommand::AnalyzeSession {
+            session_id: session_id.ok_or_else(|| {
+                AppErrorView::new(ErrorCode::InvalidRequest, "agent turn requires a session")
+            })?,
+            no_llm: false,
+            prompt: Some(prompt),
         }),
         TaskInput::ExportSession { output } => Ok(AppCommand::ExportSession {
             session_id: session_id.ok_or_else(|| {

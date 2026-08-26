@@ -37,6 +37,30 @@ pub enum ProgressEvent {
     AgentStepStarted {
         step: usize,
     },
+    AgentMessageStarted {
+        item_id: Uuid,
+    },
+    AgentTextDelta {
+        item_id: Uuid,
+        text_delta: String,
+    },
+    AgentMessageCompleted {
+        item_id: Uuid,
+        text: String,
+    },
+    ToolCallStarted {
+        item_id: Uuid,
+        tool_call_id: String,
+        name: String,
+        arguments_summary: String,
+    },
+    ToolCallCompleted {
+        item_id: Uuid,
+        tool_call_id: String,
+        name: String,
+        arguments_summary: String,
+        result_summary: String,
+    },
     UsageUpdated {
         input_tokens: u64,
         output_tokens: u64,

@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
     U[CLI compatibility adapter] --> AS[FixTrace App Service]
-    TUI[TUI / GUI clients] --> C[InProcess or WebSocket client]
+    TUI[Ratatui TUI / future GUI] --> C[InProcess or WebSocket client]
     C --> AS
     C --> SV[stdio / WebSocket App Server]
     SV --> AS
@@ -116,6 +116,8 @@ WS client B ──────┘          │                         │
 
 `fixtrace-client::WebSocketClient` 通过有界 channel 向 UI 交付事件；断线时指数退避，并从最后 sequence 恢复。App Server binary 在状态目录持有独占 writer lock，防止两个服务器同时成为该数据库的权威写者。传输的具体安全边界见 [App Server](app-server.md)。
 
+U4 Ratatui 客户端采用 `Model + TuiEvent + update -> Effect + view` 单向数据流。terminal、server、tick 和 effect result 进入同一个有界事件 channel；IO effect 在后台调用 `AppClient`，view 只读取共享 `SessionView`。Agent/Tool/Trial progress 先转换成 protocol timeline event，TUI 不读取内部历史表。详细交互和终端恢复见 [TUI](tui.md)。
+
 受控 shell 暂时作为兼容命令由 App Service 启动，因而旧脚本无行为变化；未来 TUI/GUI 不复用其 stdin/stdout 循环，而使用 U2 的类型化 message/action 命令。
 
 ## 主要模块
@@ -137,4 +139,5 @@ WS client B ──────┘          │                         │
 | `fixtrace-presenter` | Rust 共享派生字段和人类可读 summary |
 | `fixtrace-client` | transport-neutral AppClient、InProcess 合并和可重连 WebSocket client |
 | `fixtrace-server` | initialize-first 协议路由、stdio JSONL、认证 WebSocket 与 writer lock |
+| `fixtrace-tui` | Ratatui 单向状态机、响应式 timeline/inspector、多行 composer 与终端 RAII |
 | `progress` | 旧工作流进度兼容层；通过 observer 映射为持久化 AppEvent |

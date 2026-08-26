@@ -39,6 +39,7 @@ fn command_from_cli(command: Command) -> Result<AppCommand, AppError> {
         Command::Analyze { session_id, no_llm } => AppCommand::AnalyzeSession {
             session_id: parse_session_id(&session_id)?,
             no_llm,
+            prompt: None,
         },
         Command::Show { session_id } => AppCommand::GetSession {
             session_id: parse_session_id(&session_id)?,

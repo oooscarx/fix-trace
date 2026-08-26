@@ -68,7 +68,33 @@ where
     P: LlmProvider,
     T: AgentToolExecutor,
 {
-    let mut messages = initial_messages();
+    run_agent_with_prompt(
+        provider,
+        tools,
+        config,
+        cancellation,
+        progress,
+        history,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_agent_with_prompt<P, T>(
+    provider: &P,
+    tools: &mut T,
+    config: &FixTraceConfig,
+    cancellation: CancellationToken,
+    progress: Option<&ProgressSender>,
+    history: AgentHistory<'_>,
+    user_prompt: Option<&str>,
+) -> Result<AgentRunResult, AppError>
+where
+    P: LlmProvider,
+    T: AgentToolExecutor,
+{
+    let mut messages = initial_messages(user_prompt);
     for message in &messages {
         history.record("messages", &serde_json::to_value(message)?)?;
     }
@@ -140,6 +166,15 @@ where
             let calls = assistant.tool_calls.clone();
             messages.push(assistant);
             for call in calls {
+                let timeline_id = Uuid::new_v4();
+                if let Some(progress) = progress {
+                    progress.emit(ProgressEvent::ToolCallStarted {
+                        item_id: timeline_id,
+                        tool_call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments_summary: compact_json(&call.arguments),
+                    });
+                }
                 history.record("tool_calls", &serde_json::to_value(&call)?)?;
                 let tool_result = tools
                     .execute(&call.name, call.arguments.clone(), &usage)
@@ -148,6 +183,15 @@ where
                     Ok(value) => (value, false),
                     Err(error) => (json!({"error": error.to_string()}), true),
                 };
+                if let Some(progress) = progress {
+                    progress.emit(ProgressEvent::ToolCallCompleted {
+                        item_id: timeline_id,
+                        tool_call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments_summary: compact_json(&call.arguments),
+                        result_summary: compact_json(&value),
+                    });
+                }
                 consecutive_tool_failures = if failed {
                     consecutive_tool_failures.saturating_add(1)
                 } else {
@@ -171,6 +215,20 @@ where
         let content = response.content.ok_or_else(|| {
             AppError::Agent("model returned neither tool calls nor final content".to_owned())
         })?;
+        if let Some(progress) = progress {
+            let item_id = Uuid::new_v4();
+            progress.emit(ProgressEvent::AgentMessageStarted { item_id });
+            for chunk in text_chunks(&content, 128) {
+                progress.emit(ProgressEvent::AgentTextDelta {
+                    item_id,
+                    text_delta: chunk,
+                });
+            }
+            progress.emit(ProgressEvent::AgentMessageCompleted {
+                item_id,
+                text: content.clone(),
+            });
+        }
         let assistant = ChatMessage::text(MessageRole::Assistant, content.clone());
         history.record("messages", &serde_json::to_value(&assistant)?)?;
         let mut diagnosis = parse_diagnosis(&content)?;
@@ -193,8 +251,8 @@ where
     ))
 }
 
-fn initial_messages() -> Vec<ChatMessage> {
-    vec![
+fn initial_messages(user_prompt: Option<&str>) -> Vec<ChatMessage> {
+    let mut messages = vec![
         ChatMessage::text(
             MessageRole::System,
             include_str!(concat!(
@@ -206,7 +264,48 @@ fn initial_messages() -> Vec<ChatMessage> {
             MessageRole::User,
             "Analyze the verified repair trace. Use tools before concluding. Return only one bare Diagnosis JSON object (no Markdown fence or prose) with fields: statement (string), minimal_action_ids (integer array), evidence (array of {claim, classification, action_ids, trial_ids}), limitations (string array), and usage (object; FixTrace replaces it with measured API usage). Valid classifications: necessary, removable, uncertain, untested, non_replayable.",
         ),
-    ]
+    ];
+    if let Some(prompt) = user_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        messages.push(ChatMessage::text(
+            MessageRole::User,
+            format!(
+                "User focus for this analysis:\n{prompt}\n\nStill return only the required evidence-bound Diagnosis JSON."
+            ),
+        ));
+    }
+    messages
+}
+
+fn compact_json(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_owned());
+    let mut chars = text.chars();
+    let preview: String = chars.by_ref().take(512).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
+fn text_chunks(text: &str, size: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0;
+    for character in text.chars() {
+        current.push(character);
+        count += 1;
+        if count >= size {
+            chunks.push(std::mem::take(&mut current));
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn parse_diagnosis(content: &str) -> Result<Diagnosis, AppError> {
@@ -290,6 +389,7 @@ mod tests {
             provider::{LlmResponse, ToolCall, ToolDefinition},
             usage::{Usage, UsageObservation, UsageSummary},
         },
+        progress::{ProgressEvent, ProgressSender},
         replay::oracle::OracleSpec,
     };
 
@@ -364,13 +464,14 @@ mod tests {
             .save_session(&session)
             .expect("session should save");
         let mut tools = FakeTools;
+        let (progress, mut progress_events) = ProgressSender::channel(64);
 
         let result = run_agent(
             &provider,
             &mut tools,
             &FixTraceConfig::default(),
             CancellationToken::new(),
-            None,
+            Some(&progress),
             AgentHistory {
                 database: Some(&database),
                 session_id: Some(session.id),
@@ -407,6 +508,30 @@ mod tests {
                 .expect("messages should load")
                 .len()
                 >= 5
+        );
+        let mut observed = Vec::new();
+        while let Ok(event) = progress_events.try_recv() {
+            observed.push(event);
+        }
+        assert!(
+            observed
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::ToolCallStarted { name, .. } if name == "get_session_summary"))
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::ToolCallCompleted { name, .. } if name == "get_session_summary"))
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::AgentTextDelta { text_delta, .. } if !text_delta.is_empty()))
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::AgentMessageCompleted { .. }))
         );
     }
 
