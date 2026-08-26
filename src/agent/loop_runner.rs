@@ -202,6 +202,13 @@ where
             });
         }
         if usage.exceeds(&config.budget) {
+            if let Some(progress) = progress {
+                progress.emit(ProgressEvent::BudgetExceeded {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cost_usd: usage.total_cost_usd,
+                });
+            }
             return Ok(stopped(usage, step, AgentStopReason::Budget));
         }
 
@@ -644,6 +651,45 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("focus on filesystem evidence"))
         }));
+    }
+
+    #[tokio::test]
+    async fn budget_exhaustion_stops_before_tools_or_another_model_call() {
+        let provider = MockProvider::new([LlmResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "must-not-run".to_owned(),
+                name: "get_session_summary".to_owned(),
+                arguments: json!({}),
+            }],
+            usage: known_usage(),
+            request_id: Some("budget-request".to_owned()),
+            model: Some("mock".to_owned()),
+        }]);
+        let mut config = FixTraceConfig::default();
+        config.budget.max_total_tokens = 1;
+        let (progress, mut progress_events) = ProgressSender::channel(16);
+
+        let result = run_agent(
+            &provider,
+            &mut FakeTools,
+            &config,
+            CancellationToken::new(),
+            Some(&progress),
+            AgentHistory::none(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, AgentStopReason::Budget);
+        assert_eq!(result.steps, 1);
+        assert_eq!(result.usage.total_tokens, 15);
+        let mut saw_budget = false;
+        while let Ok(event) = progress_events.try_recv() {
+            saw_budget |= matches!(event, ProgressEvent::BudgetExceeded { .. });
+            assert!(!matches!(event, ProgressEvent::ToolCallStarted { .. }));
+        }
+        assert!(saw_budget);
     }
 
     #[test]

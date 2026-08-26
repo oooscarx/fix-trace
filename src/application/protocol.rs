@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
@@ -12,16 +12,17 @@ use chrono::Utc;
 use fixtrace_presenter::{SessionViewInput, present_session};
 use fixtrace_protocol::{
     ActionListResponse, AgentMessageDelta, AgentMessageItem, AppErrorView, AppEvent, AppRequest,
-    AppResponsePayload, ArtifactSummary, ConfigValue, ConnectionTestRequest,
-    ConnectionTestResponse, DependencyGraphView, DiffFileView, DiffView, EmptyRequest, EntityKind,
-    EntityRef, ErrorCode, EventBatch, EventEnvelope, InitializeRequest, InitializeResponse,
-    ItemDelta, ItemStatus, Notice, NoticeLevel, PROTOCOL_VERSION, PageInfo, PublicConfigSummary,
-    ServerCapabilities, SessionListResponse, SessionSnapshot, SubscriptionStarted, TaskFailure,
-    TaskInput, TaskProgress, TaskResult, TaskStatus, TaskSummary, TimelineItem, TimelineItemHeader,
-    ToolCallItem, TrialItem, TrialListResponse, UserMessageItem,
+    AppResponsePayload, ApprovalChoice, ApprovalKind, ApprovalPolicy, ApprovalRequest,
+    ApprovalResolution, ApprovalScope, ApprovalStatus, ArtifactSummary, ConfigValue,
+    ConnectionTestRequest, ConnectionTestResponse, DependencyGraphView, DiffFileView, DiffView,
+    EmptyRequest, EntityKind, EntityRef, ErrorCode, EventBatch, EventEnvelope, InitializeRequest,
+    InitializeResponse, ItemDelta, ItemStatus, Notice, NoticeLevel, PROTOCOL_VERSION, PageInfo,
+    PublicConfigSummary, RiskLevel, ServerCapabilities, SessionListResponse, SessionSnapshot,
+    SubscriptionStarted, TaskFailure, TaskInput, TaskProgress, TaskResult, TaskStatus, TaskSummary,
+    TimelineItem, TimelineItemHeader, ToolCallItem, TrialItem, TrialListResponse, UserMessageItem,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -30,9 +31,11 @@ use crate::{
     application::{AppCommand, AppResponse, FixTraceAppService, FixTraceApplication},
     config::FixTraceConfig,
     domain::action::ArtifactRef,
+    domain::action::{Action, ActionKind},
     domain::snapshot::SnapshotManifest,
     error::AppError,
     llm::usage::UsageSummary as CoreUsageSummary,
+    minimize::dependency::{Resource, infer_resources},
     minimize::engine::MinimizationReport,
     progress::ProgressEvent,
 };
@@ -185,7 +188,7 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                 .map(AppResponsePayload::Task)
                 .map_err(store_error_view),
             AppRequest::TaskCancel(request) => self
-                .cancel_task(request.task_id)
+                .cancel_task(request.task_id, client_id)
                 .map(AppResponsePayload::Task),
             AppRequest::TaskSteer(request) => {
                 if request.message.trim().is_empty() {
@@ -425,26 +428,29 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                     .event_store
                     .load_approval(request.approval_id)
                     .map_err(store_error_view)?;
+                if !pending.request.choices.contains(&request.choice) {
+                    return Err(AppErrorView::new(
+                        ErrorCode::InvalidRequest,
+                        "approval choice is not available for this request",
+                    ));
+                }
                 let status = match request.choice {
-                    fixtrace_protocol::ApprovalChoice::ApproveOnce
-                    | fixtrace_protocol::ApprovalChoice::ApproveForTask
-                    | fixtrace_protocol::ApprovalChoice::ApproveEquivalentForSession => {
-                        fixtrace_protocol::ApprovalStatus::Approved
-                    }
-                    fixtrace_protocol::ApprovalChoice::Deny => {
-                        fixtrace_protocol::ApprovalStatus::Denied
-                    }
-                    fixtrace_protocol::ApprovalChoice::CancelTask => {
-                        fixtrace_protocol::ApprovalStatus::Cancelled
-                    }
+                    ApprovalChoice::ApproveOnce
+                    | ApprovalChoice::ApproveForTask
+                    | ApprovalChoice::ApproveEquivalentForSession => ApprovalStatus::Approved,
+                    ApprovalChoice::Deny => ApprovalStatus::Denied,
+                    ApprovalChoice::CancelTask => ApprovalStatus::Cancelled,
                 };
-                let resolution = fixtrace_protocol::ApprovalResolution {
+                let equivalent_rule_id = (request.choice
+                    == ApprovalChoice::ApproveEquivalentForSession)
+                    .then(Uuid::new_v4);
+                let resolution = ApprovalResolution {
                     approval_id: request.approval_id,
                     choice: request.choice,
                     status,
                     resolved_by_client_id: client_id,
                     resolved_at: Utc::now(),
-                    equivalent_rule_id: None,
+                    equivalent_rule_id,
                 };
                 self.event_store
                     .resolve_approval(&resolution)
@@ -452,9 +458,17 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                 self.publish(
                     Some(pending.request.session_id),
                     Some(pending.request.task_id),
-                    AppEvent::ApprovalResolved(resolution),
+                    AppEvent::ApprovalResolved(resolution.clone()),
                 )
                 .map_err(app_error_view)?;
+                if let Some(waiter) = self
+                    .task_approval_waiters
+                    .lock()
+                    .map_err(|_| invariant_error())?
+                    .remove(&pending.request.task_id)
+                {
+                    let _ignored = waiter.send(resolution);
+                }
                 Ok(AppResponsePayload::Accepted {
                     message: "approval resolved".to_owned(),
                 })
@@ -801,6 +815,26 @@ impl FixTraceAppService {
             .map_err(app_error_view)?;
             batch = self.catch_up_protocol_events(Some(session_id), 0, 10_000)?;
         }
+        let snapshot_watermark = batch.high_watermark;
+        while batch
+            .events
+            .last()
+            .is_some_and(|event| event.sequence < snapshot_watermark)
+        {
+            let after_sequence = batch.events.last().map_or(0, |event| event.sequence);
+            let mut next =
+                self.catch_up_protocol_events(Some(session_id), after_sequence, 10_000)?;
+            next.events
+                .retain(|event| event.sequence <= snapshot_watermark);
+            if next.events.is_empty() {
+                return Err(AppErrorView::new(
+                    ErrorCode::EventGap,
+                    "session snapshot could not reach its event high watermark",
+                ));
+            }
+            batch.events.extend(next.events);
+        }
+        batch.high_watermark = snapshot_watermark;
         let mut items = BTreeMap::new();
         for event in &batch.events {
             match &event.payload {
@@ -846,6 +880,10 @@ impl FixTraceAppService {
             .event_store
             .active_task_for_session(session_id)
             .map_err(store_error_view)?;
+        let approvals = self
+            .event_store
+            .approvals_for_session(session_id)
+            .map_err(store_error_view)?;
         let diff = if detail.session.worktree_path.is_dir() {
             snapshot_diff_view(
                 &detail.session.baseline_manifest,
@@ -878,7 +916,7 @@ impl FixTraceAppService {
                 trials: detail.trials.iter().map(presentation::trial_view).collect(),
                 diagnosis: diagnosis.as_ref().map(presentation::diagnosis_view),
                 usage: presentation::usage_view(&usage, &config),
-                approvals: Vec::new(),
+                approvals,
                 dependency_graph,
                 diff,
             }),
@@ -898,11 +936,24 @@ impl FixTraceAppService {
         {
             return Ok(task);
         }
-        if let Some(session_id) = session_id {
-            self.session_detail(session_id).await?;
-        }
+        let detail = if let Some(session_id) = session_id {
+            Some(self.session_detail(session_id).await?)
+        } else {
+            None
+        };
         let command = task_command(session_id, input.clone())?;
         let task_id = Uuid::new_v4();
+        let config = self.current_config().await?;
+        let mut approval_gate = approval_gate(&config, detail.as_ref(), &input, task_id)?;
+        if let ApprovalGate::Require(request) = &approval_gate
+            && self
+                .event_store
+                .equivalent_approval_rule(request)
+                .map_err(store_error_view)?
+                .is_some()
+        {
+            approval_gate = ApprovalGate::Allow;
+        }
         if let Some(session_id) = session_id {
             let mut sessions = self.session_tasks.lock().map_err(|_| invariant_error())?;
             if sessions.contains_key(&session_id) {
@@ -970,7 +1021,9 @@ impl FixTraceAppService {
             .insert(task_id, cancellation.clone());
         let service = self.clone();
         tokio::spawn(async move {
-            service.run_task(task, command, cancellation).await;
+            service
+                .run_task(task, command, approval_gate, cancellation)
+                .await;
         });
         self.event_store
             .load_task(task_id)
@@ -981,6 +1034,7 @@ impl FixTraceAppService {
         &self,
         queued: TaskSummary,
         command: AppCommand,
+        approval_gate: ApprovalGate,
         cancellation: CancellationToken,
     ) {
         let result = async {
@@ -996,9 +1050,27 @@ impl FixTraceAppService {
                 Some(running.id),
                 AppEvent::TaskStarted(running.clone()),
             )?;
-            let response = self
-                .execute_with_context(command, cancellation.clone(), Some(queued.id))
-                .await;
+            let response = match approval_gate {
+                ApprovalGate::Allow => self
+                    .execute_with_context(command, cancellation.clone(), Some(queued.id))
+                    .await
+                    .map_err(app_error_view),
+                ApprovalGate::Deny(error) => Err(error),
+                ApprovalGate::Require(request) => match self
+                    .await_task_approval(&running, request, &cancellation)
+                    .await
+                {
+                    Ok(true) => self
+                        .execute_with_context(command, cancellation.clone(), Some(queued.id))
+                        .await
+                        .map_err(app_error_view),
+                    Ok(false) => Err(AppErrorView::new(
+                        ErrorCode::Cancelled,
+                        "task was cancelled by its approval decision",
+                    )),
+                    Err(error) => Err(app_error_view(error)),
+                },
+            };
             if cancellation.is_cancelled() {
                 let current = self.event_store.load_task(queued.id)?;
                 let cancelled = if current.status == TaskStatus::Cancelling {
@@ -1053,7 +1125,7 @@ impl FixTraceAppService {
                             Some(failed.id),
                             AppEvent::TaskFailed(TaskFailure {
                                 task: failed,
-                                error: app_error_view(error),
+                                error,
                             }),
                         )?;
                     }
@@ -1081,7 +1153,88 @@ impl FixTraceAppService {
         }
     }
 
-    fn cancel_task(&self, task_id: Uuid) -> Result<TaskSummary, AppErrorView> {
+    async fn await_task_approval(
+        &self,
+        running: &TaskSummary,
+        request: ApprovalRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<bool, AppError> {
+        let waiting = self
+            .event_store
+            .transition_task(running.id, TaskStatus::WaitingForApproval)?;
+        self.event_store.save_approval(&request)?;
+        let (sender, receiver) = oneshot::channel();
+        self.task_approval_waiters
+            .lock()
+            .map_err(|_| {
+                AppError::ServiceInvariant("approval waiter lock was poisoned".to_owned())
+            })?
+            .insert(running.id, sender);
+        if let Err(error) = self.publish(
+            waiting.session_id,
+            Some(waiting.id),
+            AppEvent::ApprovalRequested(request),
+        ) {
+            if let Ok(mut waiters) = self.task_approval_waiters.lock() {
+                waiters.remove(&running.id);
+            }
+            return Err(error);
+        }
+        let resolution = tokio::select! {
+            resolution = receiver => Some(resolution.map_err(|_| {
+                AppError::ServiceInvariant("approval waiter closed without a decision".to_owned())
+            })?),
+            () = cancellation.cancelled() => None,
+        };
+        if let Ok(mut waiters) = self.task_approval_waiters.lock() {
+            waiters.remove(&running.id);
+        }
+        let Some(resolution) = resolution else {
+            return Ok(false);
+        };
+        if resolution.status == ApprovalStatus::Approved {
+            let current = self.event_store.load_task(running.id)?;
+            if current.status != TaskStatus::WaitingForApproval {
+                return Ok(false);
+            }
+            let resumed = self
+                .event_store
+                .transition_task(running.id, TaskStatus::Running)?;
+            self.publish(
+                resumed.session_id,
+                Some(resumed.id),
+                AppEvent::TaskProgress(TaskProgress {
+                    task: resumed,
+                    current: None,
+                    total: None,
+                    unit: None,
+                    message: "Approval granted; resuming".to_owned(),
+                }),
+            )?;
+            return Ok(true);
+        }
+        let current = self.event_store.load_task(running.id)?;
+        if current.status == TaskStatus::WaitingForApproval {
+            let cancelling = self
+                .event_store
+                .transition_task(running.id, TaskStatus::Cancelling)?;
+            self.publish(
+                cancelling.session_id,
+                Some(cancelling.id),
+                AppEvent::TaskProgress(TaskProgress {
+                    task: cancelling,
+                    current: None,
+                    total: None,
+                    unit: None,
+                    message: "Approval denied; cancelling without execution".to_owned(),
+                }),
+            )?;
+        }
+        cancellation.cancel();
+        Ok(false)
+    }
+
+    fn cancel_task(&self, task_id: Uuid, client_id: Uuid) -> Result<TaskSummary, AppErrorView> {
         let task = self
             .event_store
             .load_task(task_id)
@@ -1105,6 +1258,32 @@ impl FixTraceAppService {
             .get(&task_id)
         {
             cancellation.cancel();
+        }
+        if let Some(pending) = self
+            .event_store
+            .pending_approval_for_task(task_id)
+            .map_err(store_error_view)?
+        {
+            let resolution = ApprovalResolution {
+                approval_id: pending.request.id,
+                choice: ApprovalChoice::CancelTask,
+                status: ApprovalStatus::Cancelled,
+                resolved_by_client_id: client_id,
+                resolved_at: Utc::now(),
+                equivalent_rule_id: None,
+            };
+            match self.event_store.resolve_approval(&resolution) {
+                Ok(_) => {
+                    self.publish(
+                        Some(pending.request.session_id),
+                        Some(task_id),
+                        AppEvent::ApprovalResolved(resolution),
+                    )
+                    .map_err(app_error_view)?;
+                }
+                Err(fixtrace_store::StoreError::ApprovalAlreadyResolved(_)) => {}
+                Err(error) => return Err(store_error_view(error)),
+            }
         }
         if next == TaskStatus::Cancelled {
             self.publish(
@@ -1257,6 +1436,21 @@ pub(super) fn progress_event_payload(
                 exact: true,
             },
         ))),
+        ProgressEvent::BudgetExceeded {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        } => Some(AppEvent::BudgetWarning(fixtrace_protocol::BudgetWarning {
+            usage: fixtrace_presenter::present_usage(fixtrace_presenter::UsagePresentationInput {
+                input_tokens: *input_tokens,
+                output_tokens: *output_tokens,
+                total_cost_usd: *cost_usd,
+                token_limit: config.budget.max_total_tokens,
+                cost_limit_usd: config.budget.max_cost_usd,
+                exact: true,
+            }),
+            message: "Agent budget exhausted; no further model calls will be made".to_owned(),
+        })),
         ProgressEvent::Cancelled => Some(notice("cancelled", "Operation cancelled".to_owned())),
         ProgressEvent::Finished => Some(notice("finished", "Operation finished".to_owned())),
     }
@@ -1272,6 +1466,306 @@ fn timeline_header(id: Uuid, status: ItemStatus, entity: Option<EntityRef>) -> T
         artifacts: Vec::new(),
         entities: entity.into_iter().collect(),
     }
+}
+
+#[derive(Debug)]
+enum ApprovalGate {
+    Allow,
+    Deny(AppErrorView),
+    Require(ApprovalRequest),
+}
+
+#[derive(Debug)]
+struct ExecutionIntent {
+    title: String,
+    reason: String,
+    command_preview: Option<String>,
+    action_ids: Vec<u64>,
+    affected_paths: Vec<PathBuf>,
+    accesses_network: bool,
+    has_external_paths: bool,
+    opaque: bool,
+    all_operations_recorded_safe: bool,
+    executes_actions: bool,
+    mutates_outside_trial: bool,
+    requires_execution: bool,
+}
+
+fn approval_gate(
+    config: &FixTraceConfig,
+    detail: Option<&super::SessionDetail>,
+    input: &TaskInput,
+    task_id: Uuid,
+) -> Result<ApprovalGate, AppErrorView> {
+    let Some(detail) = detail else {
+        return Ok(ApprovalGate::Allow);
+    };
+    let intent = execution_intent(detail, input)?;
+    if !intent.requires_execution {
+        return Ok(ApprovalGate::Allow);
+    }
+    let require_approval = match config.approval.policy {
+        ApprovalPolicy::ReadOnly => {
+            if intent.executes_actions || intent.mutates_outside_trial {
+                return Ok(ApprovalGate::Deny(AppErrorView::new(
+                    ErrorCode::SandboxDenied,
+                    "approval policy is read-only; this task would execute an Action or modify files",
+                )));
+            }
+            false
+        }
+        ApprovalPolicy::AskAlways => true,
+        ApprovalPolicy::AskForOpaque => {
+            intent.opaque
+                || intent.has_external_paths
+                || intent.accesses_network
+                || !intent.all_operations_recorded_safe
+        }
+        ApprovalPolicy::AutoRecordedSafe => !intent.all_operations_recorded_safe,
+    };
+    if !require_approval {
+        return Ok(ApprovalGate::Allow);
+    }
+    let (kind, risk) = if intent.accesses_network {
+        (ApprovalKind::NetworkAccess, RiskLevel::High)
+    } else if intent.has_external_paths {
+        (ApprovalKind::ExternalPath, RiskLevel::High)
+    } else if intent.opaque {
+        (ApprovalKind::OpaqueAction, RiskLevel::High)
+    } else if !intent.affected_paths.is_empty() {
+        (ApprovalKind::FileMutation, RiskLevel::Medium)
+    } else {
+        (ApprovalKind::ReplayCommand, RiskLevel::Medium)
+    };
+    let mut choices = vec![ApprovalChoice::ApproveOnce, ApprovalChoice::ApproveForTask];
+    if !intent.action_ids.is_empty()
+        || matches!(
+            &kind,
+            ApprovalKind::ReplayCommand | ApprovalKind::FileMutation
+        )
+    {
+        choices.push(ApprovalChoice::ApproveEquivalentForSession);
+    }
+    choices.extend([ApprovalChoice::Deny, ApprovalChoice::CancelTask]);
+    Ok(ApprovalGate::Require(ApprovalRequest {
+        id: Uuid::new_v4(),
+        session_id: detail.session.id,
+        task_id,
+        kind,
+        title: intent.title,
+        reason: intent.reason,
+        risk,
+        command_preview: intent.command_preview,
+        cwd: Some(detail.session.worktree_path.clone()),
+        affected_paths: intent.affected_paths,
+        action_ids: intent.action_ids,
+        accesses_network: intent.accesses_network,
+        sandbox_path: Some(detail.session.worktree_path.clone()),
+        requested_scope: ApprovalScope::Once,
+        choices,
+        created_at: Utc::now(),
+    }))
+}
+
+fn execution_intent(
+    detail: &super::SessionDetail,
+    input: &TaskInput,
+) -> Result<ExecutionIntent, AppErrorView> {
+    let mut selected_actions: Vec<&Action> = match input {
+        TaskInput::ReplayFullTrace
+        | TaskInput::AnalyzeMinimalTrace { .. }
+        | TaskInput::AgentTurn { .. }
+        | TaskInput::GenerateDiagnosis { .. } => detail.actions.iter().collect(),
+        TaskInput::RepeatTrial { trial_id } => {
+            let trial = detail
+                .trials
+                .iter()
+                .find(|trial| trial.id == *trial_id)
+                .ok_or_else(|| AppErrorView::new(ErrorCode::NotFound, "trial was not found"))?;
+            trial
+                .action_ids
+                .iter()
+                .map(|action_id| {
+                    detail
+                        .actions
+                        .iter()
+                        .find(|action| action.id == *action_id)
+                        .ok_or_else(|| {
+                            AppErrorView::new(
+                                ErrorCode::InvalidRequest,
+                                format!("trial references unknown action {action_id}"),
+                            )
+                        })
+                })
+                .collect::<Result<_, _>>()?
+        }
+        TaskInput::RecordTrace { line } if line.trim() == ":done" => {
+            detail.actions.iter().collect()
+        }
+        _ => Vec::new(),
+    };
+    selected_actions.sort_by_key(|action| action.original_order);
+
+    let mut affected_paths = BTreeSet::new();
+    let mut accesses_network = false;
+    let mut has_external_paths = false;
+    let mut opaque = false;
+    let mut all_operations_recorded_safe = true;
+    for action in &selected_actions {
+        let access = infer_resources(action);
+        opaque |= access.opaque;
+        accesses_network |= action_accesses_network(action);
+        has_external_paths |= !safe_project_relative_path(&action.cwd_before);
+        for resource in access.reads.iter().chain(&access.writes) {
+            if let Resource::File(path) = resource {
+                has_external_paths |= !safe_project_relative_path(path);
+            }
+        }
+        for resource in &access.writes {
+            if let Resource::File(path) = resource {
+                affected_paths.insert(path.clone());
+            }
+        }
+        all_operations_recorded_safe &= action.replayable
+            && !access.opaque
+            && !action_accesses_network(action)
+            && safe_project_relative_path(&action.cwd_before);
+    }
+
+    let trimmed_line = match input {
+        TaskInput::RecordTrace { line } => Some(line.trim()),
+        _ => None,
+    };
+    let is_recording_command = trimmed_line.is_some_and(|line| !line.starts_with(':'));
+    if is_recording_command {
+        let line = trimmed_line.unwrap_or_default();
+        let probe = Action {
+            id: 0,
+            original_order: 0,
+            cwd_before: PathBuf::new(),
+            kind: ActionKind::ShellCommand {
+                command: line.to_owned(),
+            },
+            replayable: true,
+            note: None,
+            result: None,
+        };
+        let access = infer_resources(&probe);
+        opaque |= access.opaque;
+        accesses_network |= action_accesses_network(&probe);
+        for resource in &access.writes {
+            if let Resource::File(path) = resource {
+                affected_paths.insert(path.clone());
+                has_external_paths |= !safe_project_relative_path(path);
+            }
+        }
+        all_operations_recorded_safe = false;
+    }
+
+    let is_export = matches!(input, TaskInput::ExportSession { .. });
+    if let TaskInput::ExportSession { output } = input {
+        affected_paths.insert(output.clone());
+        has_external_paths = true;
+        all_operations_recorded_safe = false;
+    }
+    let is_passive_recording_command =
+        trimmed_line.is_some_and(|line| matches!(line, ":status" | ":verify"));
+    let requires_execution = !matches!(input, TaskInput::Demo { .. })
+        && (!is_passive_recording_command || matches!(input, TaskInput::VerifyBaseline));
+    let executes_actions = !selected_actions.is_empty() || is_recording_command;
+    let mutates_outside_trial = is_recording_command || is_export;
+    let action_ids = selected_actions
+        .iter()
+        .map(|action| action.id)
+        .collect::<Vec<_>>();
+    let command_preview = match input {
+        TaskInput::RecordTrace { line } => Some(truncate_preview(line)),
+        TaskInput::ExportSession { output } => {
+            Some(format!("Export session to {}", output.display()))
+        }
+        TaskInput::VerifyBaseline => Some(format!(
+            "Run Oracle: {}",
+            truncate_preview(&detail.session.oracle.command)
+        )),
+        _ if selected_actions.len() == 1 => match &selected_actions[0].kind {
+            ActionKind::ShellCommand { command } => Some(truncate_preview(command)),
+            _ => Some(format!("Replay recorded Action {}", selected_actions[0].id)),
+        },
+        _ if !selected_actions.is_empty() => Some(format!(
+            "Replay {} recorded Actions",
+            selected_actions.len()
+        )),
+        _ => Some(format!(
+            "Run Oracle: {}",
+            truncate_preview(&detail.session.oracle.command)
+        )),
+    };
+    Ok(ExecutionIntent {
+        title: task_title(input).to_owned(),
+        reason: if accesses_network {
+            "The operation may access the network; approval is required before execution."
+                .to_owned()
+        } else if has_external_paths {
+            "The operation references a path outside the project sandbox.".to_owned()
+        } else if opaque {
+            "FixTrace cannot determine all side effects of this operation.".to_owned()
+        } else if !all_operations_recorded_safe {
+            "The operation is not an already-recorded, structurally safe Action.".to_owned()
+        } else {
+            "The active policy requires approval before every candidate execution.".to_owned()
+        },
+        command_preview,
+        action_ids,
+        affected_paths: affected_paths.into_iter().collect(),
+        accesses_network,
+        has_external_paths,
+        opaque,
+        all_operations_recorded_safe,
+        executes_actions,
+        mutates_outside_trial,
+        requires_execution,
+    })
+}
+
+fn safe_project_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+fn action_accesses_network(action: &Action) -> bool {
+    let ActionKind::ShellCommand { command } = &action.kind else {
+        return false;
+    };
+    let lower = command.to_ascii_lowercase();
+    if lower.contains("http://") || lower.contains("https://") {
+        return true;
+    }
+    let Ok(words) = shell_words::split(command) else {
+        return false;
+    };
+    let executable = words
+        .first()
+        .and_then(|word| Path::new(word).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    matches!(
+        executable,
+        "curl" | "wget" | "ssh" | "scp" | "sftp" | "nc" | "ncat" | "telnet"
+    ) || (executable == "cargo"
+        && words
+            .get(1)
+            .is_some_and(|argument| matches!(argument.as_str(), "install" | "search" | "update")))
+}
+
+fn truncate_preview(value: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut preview = value.chars().take(MAX_CHARS).collect::<String>();
+    if value.chars().count() > MAX_CHARS {
+        preview.push('…');
+    }
+    preview
 }
 
 fn task_command(session_id: Option<Uuid>, input: TaskInput) -> Result<AppCommand, AppErrorView> {

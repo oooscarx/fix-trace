@@ -120,6 +120,7 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .transcript-heading { min-height: 72px; padding: 13px 20px; border-bottom: 1px solid var(--border); }
 .transcript-heading h1 { margin: 3px 0 0; font-size: 17px; letter-spacing: -.02em; }
 .task-actions { display: flex; gap: 5px; }
+.timeline-count { align-self: center; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; margin-right: 4px; }
 .timeline { min-height: 0; scroll-behavior: smooth; }
 .timeline-item-wrap { padding: 0 max(20px, 6vw); }
 .timeline-item-wrap:first-child { padding-top: 26px; }

@@ -1,4 +1,4 @@
-use fixtrace_protocol::{ItemStatus, TimelineItem};
+use fixtrace_protocol::{ApprovalChoice, ItemStatus, TimelineItem};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -178,8 +178,25 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, model: &Model) {
 fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &Model) {
     let inner_width = usize::from(area.width.saturating_sub(4)).max(8);
     let mut lines = Vec::new();
+    let mut title = " Transcript ".to_owned();
     if let Some(session) = &model.session {
-        for item in &session.timeline {
+        let total = session.timeline.len();
+        let window_size = usize::from(area.height).saturating_mul(3).max(64);
+        let start = if model.follow_tail {
+            total.saturating_sub(window_size)
+        } else {
+            usize::from(model.scroll).min(total.saturating_sub(1))
+        };
+        let end = start.saturating_add(window_size).min(total);
+        if total > window_size {
+            title = format!(
+                " Transcript · {}–{} / {} ",
+                start.saturating_add(1),
+                end,
+                total
+            );
+        }
+        for item in &session.timeline[start..end] {
             timeline_lines(&mut lines, item, inner_width, model);
             lines.push(Line::raw(""));
         }
@@ -200,14 +217,12 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &Model) {
     let scroll = if model.follow_tail {
         u16::try_from(max_scroll).unwrap_or(u16::MAX)
     } else {
-        model
-            .scroll
-            .min(u16::try_from(max_scroll).unwrap_or(u16::MAX))
+        0
     };
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((scroll, 0))
-            .block(Block::default().borders(Borders::ALL).title(" Transcript "))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -849,6 +864,20 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, model: &Model, id: uuid::U
         || vec![Line::raw("Approval details are being refreshed…")],
         |approval| {
             let request = &approval.request;
+            let shortcuts = [
+                (ApprovalChoice::ApproveOnce, "y once"),
+                (ApprovalChoice::ApproveForTask, "t task"),
+                (
+                    ApprovalChoice::ApproveEquivalentForSession,
+                    "s equivalent/session",
+                ),
+                (ApprovalChoice::Deny, "n deny"),
+                (ApprovalChoice::CancelTask, "c cancel task"),
+            ]
+            .into_iter()
+            .filter_map(|(choice, label)| request.choices.contains(&choice).then_some(label))
+            .collect::<Vec<_>>()
+            .join(" · ");
             vec![
                 Line::styled(
                     request.title.clone(),
@@ -881,10 +910,7 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, model: &Model, id: uuid::U
                 Line::raw(format!("Paths     {:?}", request.affected_paths)),
                 Line::raw(format!("Network   {}", request.accesses_network)),
                 Line::raw(""),
-                Line::styled(
-                    "y once · t task · s equivalent/session · n deny · c cancel task",
-                    Style::default().fg(model.theme.accent()),
-                ),
+                Line::styled(shortcuts, Style::default().fg(model.theme.accent())),
             ]
         },
     );

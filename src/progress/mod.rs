@@ -66,6 +66,11 @@ pub enum ProgressEvent {
         output_tokens: u64,
         cost_usd: f64,
     },
+    BudgetExceeded {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+    },
     Cancelled,
     Finished,
 }

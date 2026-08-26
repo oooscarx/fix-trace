@@ -5,7 +5,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use fixtrace_protocol::{AppEvent, EventBatch, EventEnvelope};
+use fixtrace_protocol::{
+    AppErrorView, AppEvent, ApprovalResolution, ErrorCode, EventBatch, EventEnvelope, TaskFailure,
+};
 use fixtrace_store::EventStore;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -62,6 +64,14 @@ pub struct FixTraceAppService {
     pub(super) session_tasks: Arc<Mutex<HashMap<Uuid, Uuid>>>,
     pub(super) task_steers: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<String>>>>,
     pub(super) task_steer_receivers: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedReceiver<String>>>>,
+    pub(super) task_approval_waiters:
+        Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalResolution>>>>,
+}
+
+#[derive(Debug)]
+struct PendingAgentDelta {
+    item_id: Uuid,
+    text: String,
 }
 
 impl FixTraceAppService {
@@ -79,6 +89,20 @@ impl FixTraceAppService {
         } else {
             EventStore::deferred(&state_paths.database)
         };
+        if options.initialize_event_store {
+            for task in event_store.interrupt_active_tasks()? {
+                let mut error = AppErrorView::new(
+                    ErrorCode::Internal,
+                    "task was interrupted because the App Service restarted",
+                );
+                error.retryable = true;
+                event_store.append(
+                    task.session_id,
+                    Some(task.id),
+                    AppEvent::TaskFailed(TaskFailure { task, error }),
+                )?;
+            }
+        }
         let (progress, initial_receiver) = ProgressSender::channel(1_024);
         drop(initial_receiver);
         let (events, initial_events) = broadcast::channel(4_096);
@@ -106,6 +130,7 @@ impl FixTraceAppService {
             session_tasks: Arc::new(Mutex::new(HashMap::new())),
             task_steers: Arc::new(Mutex::new(HashMap::new())),
             task_steer_receivers,
+            task_approval_waiters: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -643,11 +668,12 @@ impl AppServiceWorker {
         let store = self.event_store.clone();
         let events = self.events.clone();
         let config = self.config.clone();
+        let pending_delta = Arc::new(Mutex::new(None));
         self.progress.with_observer(move |progress| {
-            if let Some(payload) = progress_event_payload(progress, &config)
-                && let Err(error) = publish_event(&store, &events, session_id, task_id, payload)
-            {
-                tracing::error!("failed to persist progress event: {error}");
+            for payload in coalesced_progress_payloads(progress, &config, &pending_delta) {
+                if let Err(error) = publish_event(&store, &events, session_id, task_id, payload) {
+                    tracing::error!("failed to persist progress event: {error}");
+                }
             }
         })
     }
@@ -678,4 +704,109 @@ fn publish_event(
     let envelope = store.append(session_id, task_id, payload)?;
     let _ignored = events.send(envelope.clone());
     Ok(envelope)
+}
+
+const MIN_PERSISTED_AGENT_DELTA_BYTES: usize = 256;
+
+fn coalesced_progress_payloads(
+    progress: &ProgressEvent,
+    config: &FixTraceConfig,
+    pending_delta: &Mutex<Option<PendingAgentDelta>>,
+) -> Vec<AppEvent> {
+    let Ok(mut pending) = pending_delta.lock() else {
+        return progress_event_payload(progress, config)
+            .into_iter()
+            .collect();
+    };
+    let mut payloads = Vec::new();
+    if let ProgressEvent::AgentTextDelta {
+        item_id,
+        text_delta,
+    } = progress
+    {
+        if pending
+            .as_ref()
+            .is_some_and(|current| current.item_id != *item_id)
+            && let Some(previous) = pending.take()
+        {
+            payloads.push(agent_delta_payload(previous));
+        }
+        let current = pending.get_or_insert_with(|| PendingAgentDelta {
+            item_id: *item_id,
+            text: String::new(),
+        });
+        current.text.push_str(text_delta);
+        if current.text.len() >= MIN_PERSISTED_AGENT_DELTA_BYTES
+            && let Some(combined) = pending.take()
+        {
+            payloads.push(agent_delta_payload(combined));
+        }
+        return payloads;
+    }
+    if let Some(combined) = pending.take() {
+        payloads.push(agent_delta_payload(combined));
+    }
+    payloads.extend(progress_event_payload(progress, config));
+    payloads
+}
+
+fn agent_delta_payload(delta: PendingAgentDelta) -> AppEvent {
+    AppEvent::ItemDelta(fixtrace_protocol::ItemDelta::AgentMessage(
+        fixtrace_protocol::AgentMessageDelta {
+            item_id: delta.item_id,
+            text_delta: delta.text,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PendingAgentDelta, coalesced_progress_payloads};
+    use crate::{config::FixTraceConfig, progress::ProgressEvent};
+    use fixtrace_protocol::{AppEvent, ItemDelta};
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    #[test]
+    fn tiny_agent_deltas_are_coalesced_without_losing_final_text() {
+        let config = FixTraceConfig::default();
+        let pending = Mutex::new(None::<PendingAgentDelta>);
+        let item_id = Uuid::new_v4();
+        let text = "x".repeat(600);
+        let mut events = Vec::new();
+        for character in text.chars() {
+            events.extend(coalesced_progress_payloads(
+                &ProgressEvent::AgentTextDelta {
+                    item_id,
+                    text_delta: character.to_string(),
+                },
+                &config,
+                &pending,
+            ));
+        }
+        events.extend(coalesced_progress_payloads(
+            &ProgressEvent::AgentMessageCompleted {
+                item_id,
+                text: text.clone(),
+            },
+            &config,
+            &pending,
+        ));
+
+        assert!(
+            events.len() < 10,
+            "single-character deltas were not bounded"
+        );
+        let streamed = events
+            .iter()
+            .filter_map(|event| match event {
+                AppEvent::ItemDelta(ItemDelta::AgentMessage(delta)) => {
+                    Some(delta.text_delta.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed, text);
+        assert!(matches!(events.last(), Some(AppEvent::ItemCompleted(_))));
+    }
 }

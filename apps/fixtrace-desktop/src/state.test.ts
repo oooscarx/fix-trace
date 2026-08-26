@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { EventEnvelope } from "./protocol";
 import type { AppState } from "./state";
 import { initialState, reducer } from "./state";
 
@@ -159,5 +160,23 @@ describe("desktop reducer", () => {
       is_cancellable: false,
     };
     expect(reducer(updated, { type: "task", task: staleResponse })).toBe(updated);
+  });
+
+  it("advances past an unknown future event without changing business state", () => {
+    const state = stateWithAgent();
+    const event = {
+      schema_version: 1,
+      stream_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      sequence: 5,
+      event_id: "99999999-9999-4999-8999-999999999999",
+      timestamp: "2026-08-26T12:00:00Z",
+      session_id: sessionId,
+      task_id: null,
+      payload: { type: "future_event", data: { added_later: true } },
+    } as unknown as EventEnvelope;
+    const updated = reducer(state, { type: "event", event });
+    expect(updated.throughSequence).toBe(5);
+    expect(updated.session).toBe(state.session);
+    expect(updated.error).toBeNull();
   });
 });

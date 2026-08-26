@@ -590,6 +590,7 @@ export function App() {
           <div className="transcript-heading">
             <div><span className="eyebrow">Verified repair workspace</span><h1>{state.session?.summary.project_name ?? "Open a session"}</h1></div>
             <div className="task-actions">
+              {state.session && <span className="timeline-count">{state.session.timeline.length.toLocaleString()} items</span>}
               <button className="quiet-button" disabled={!state.selectedSessionId || isActive} onClick={() => void startTask({ type: "verify_baseline" })}>Verify</button>
               <button className="quiet-button" disabled={!state.selectedSessionId || isActive} onClick={() => void startTask({ type: "replay_full_trace" })}>Replay</button>
               <button className="accent-button" disabled={!state.selectedSessionId || isActive} onClick={() => void startTask({ type: "analyze_minimal_trace", data: { no_llm: false } })}>Analyze</button>

@@ -53,7 +53,7 @@ List 请求统一用 opaque cursor，默认 100、最大 500。Artifact 按 byte
 Task kind：Agent turn、录制、baseline 验证、全量 replay、最小化、repeat trial、诊断、导出和 demo。
 
 ```text
-Queued -> Running | Cancelled | Failed
+Queued -> Running | Cancelled | Failed | Interrupted
 Running -> WaitingForApproval | Cancelling | Completed | Failed | Interrupted
 WaitingForApproval -> Running | Cancelling | Failed | Interrupted
 Cancelling -> Cancelled | Failed | Interrupted
@@ -102,7 +102,9 @@ Agent 增量只含用户可见文本。协议没有隐藏 chain-of-thought 字�
 
 Policy 为 `read_only`、`ask_always`、`ask_for_opaque`、`auto_recorded_safe`。Request 显示操作、原因、风险、命令、cwd、路径、Action IDs、网络、Trial sandbox 和请求 scope。Choice 为单次批准、task 批准、当前 Session 结构化等价规则批准、拒绝或取消任务。
 
-审批是授权层，不替代 local-copy sandbox、路径/symlink guard 或进程监督。多个客户端只能有一个响应通过 compare-and-set，其余收到 `approval_resolved`。
+审批是授权层，不替代 local-copy sandbox、路径/symlink guard 或进程监督。Task 在命令执行前进入 `WaitingForApproval`，审批会写入 SQLite 并随 Session snapshot 恢复；Deny/Cancel 不执行命令。多个客户端只能有一个响应通过 compare-and-set，其余收到 `approval_resolved`。
+
+`ApproveEquivalentForSession` 只对 kind、完整命令预览、cwd、受影响路径、Action IDs、网络标记和 sandbox 都相同的结构化规则复用，不做字符串前缀匹配。无法安全形成等价规则的未录制 opaque/network 请求不会提供该 scope。
 
 ## 共享 Presentation Model
 

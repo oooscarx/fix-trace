@@ -435,7 +435,7 @@ impl Model {
                 self.status = "Event gap detected; rebuilding snapshot".to_owned();
                 return self.refresh_effect();
             }
-            AppEvent::ItemDelta(_) => {}
+            AppEvent::ItemDelta(_) | AppEvent::Unknown => {}
         }
         Vec::new()
     }

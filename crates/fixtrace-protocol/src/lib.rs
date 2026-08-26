@@ -37,8 +37,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{
-        AppEvent, EVENT_SCHEMA_VERSION, EventEnvelope, Notice, NoticeLevel,
-        is_compatible_protocol_version,
+        ActionView, AppEvent, EVENT_SCHEMA_VERSION, EventEnvelope, Notice, NoticeLevel,
+        SessionSummary, is_compatible_protocol_version,
     };
 
     #[test]
@@ -68,6 +68,72 @@ mod tests {
             }),
         };
         insta::assert_json_snapshot!("event_envelope_notice", event);
+    }
+
+    #[test]
+    fn unknown_future_events_are_ignored_without_losing_the_envelope() {
+        let event: EventEnvelope = serde_json::from_value(serde_json::json!({
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "stream_id": "11111111-1111-4111-8111-111111111111",
+            "sequence": 8,
+            "event_id": "22222222-2222-4222-8222-222222222222",
+            "timestamp": "2026-08-26T12:00:00Z",
+            "session_id": null,
+            "task_id": null,
+            "payload": { "type": "future_event", "data": { "new": true } }
+        }))
+        .expect("unknown events should decode to the forward-compatible sentinel");
+        assert_eq!(event.payload, AppEvent::Unknown);
+        event
+            .validate()
+            .expect("the containing envelope remains valid");
+    }
+
+    #[test]
+    fn old_optional_view_fields_receive_safe_defaults() {
+        let session: SessionSummary = serde_json::from_value(serde_json::json!({
+            "id": "33333333-3333-4333-8333-333333333333",
+            "project_name": "legacy",
+            "status": "recording",
+            "active_task_id": null,
+            "parent_session_id": null,
+            "archived": false,
+            "created_at": "2026-08-26T12:00:00Z",
+            "updated_at": "2026-08-26T12:00:00Z"
+        }))
+        .expect("legacy session summary should remain readable");
+        assert!(session.project_path.is_empty());
+
+        let action: ActionView = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "original_order": 1,
+            "kind": "shell_command",
+            "cwd": ".",
+            "summary": "legacy action",
+            "replayable": true,
+            "can_rerun": true,
+            "note": null
+        }))
+        .expect("legacy action view should remain readable");
+        assert!(action.reads.is_empty());
+        assert!(action.writes.is_empty());
+        assert!(!action.resource_access_opaque);
+    }
+
+    #[test]
+    fn unsupported_event_schema_is_rejected_explicitly() {
+        let event = EventEnvelope {
+            schema_version: 0,
+            stream_id: uuid("11111111-1111-4111-8111-111111111111"),
+            sequence: 1,
+            event_id: uuid("22222222-2222-4222-8222-222222222222"),
+            timestamp: "2026-08-26T12:00:00Z".parse().unwrap(),
+            session_id: None,
+            task_id: None,
+            payload: AppEvent::Unknown,
+        };
+        let error = event.validate().expect_err("old schema requires recovery");
+        assert!(error.message.contains("unsupported event schema version 0"));
     }
 
     fn uuid(value: &str) -> Uuid {

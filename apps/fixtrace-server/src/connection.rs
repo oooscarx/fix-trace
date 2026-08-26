@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use chrono::Utc;
 use fixtrace::application::FixTraceProtocolApplication;
@@ -13,6 +16,8 @@ pub struct ConnectionState {
     application: Arc<dyn FixTraceProtocolApplication>,
     client_id: Option<Uuid>,
     subscriptions: HashMap<Uuid, SubscriptionState>,
+    seen_request_ids: HashSet<Uuid>,
+    request_order: VecDeque<Uuid>,
 }
 
 pub struct ConnectionReply {
@@ -45,6 +50,8 @@ impl ConnectionState {
             application,
             client_id: None,
             subscriptions: HashMap::new(),
+            seen_request_ids: HashSet::new(),
+            request_order: VecDeque::new(),
         }
     }
 
@@ -66,6 +73,15 @@ impl ConnectionState {
     }
 
     pub async fn handle_request(&mut self, request: RequestEnvelope) -> ConnectionReply {
+        if !self.remember_request_id(request.id) {
+            return error_reply(
+                request.id,
+                AppErrorView::new(
+                    ErrorCode::Conflict,
+                    "request id has already been used on this connection",
+                ),
+            );
+        }
         let typed = match request.decode() {
             Ok(request) => request,
             Err(error) => return error_reply(request.id, error),
@@ -142,6 +158,20 @@ impl ConnectionState {
                 }
             }
         }
+    }
+
+    fn remember_request_id(&mut self, request_id: Uuid) -> bool {
+        const MAX_REMEMBERED_REQUESTS: usize = 4_096;
+        if !self.seen_request_ids.insert(request_id) {
+            return false;
+        }
+        self.request_order.push_back(request_id);
+        if self.request_order.len() > MAX_REMEMBERED_REQUESTS
+            && let Some(expired) = self.request_order.pop_front()
+        {
+            self.seen_request_ids.remove(&expired);
+        }
+        true
     }
 
     pub fn apply_action(

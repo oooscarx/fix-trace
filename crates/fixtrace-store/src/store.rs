@@ -2,8 +2,8 @@ use std::{fs, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 use fixtrace_protocol::{
-    AppEvent, ApprovalRequest, ApprovalResolution, ApprovalStatus, ApprovalView, EventBatch,
-    EventEnvelope, EventGap, TaskStatus, TaskSummary,
+    AppEvent, ApprovalChoice, ApprovalRequest, ApprovalResolution, ApprovalStatus, ApprovalView,
+    EventBatch, EventEnvelope, EventGap, TaskStatus, TaskSummary,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
@@ -311,6 +311,56 @@ impl EventStore {
             .map_err(StoreError::from)
     }
 
+    /// Marks work that cannot survive a process restart as interrupted. This is
+    /// deliberately transactional with expiring its pending approvals so a
+    /// restarted client never sees an actionable approval for a dead task.
+    pub fn interrupt_active_tasks(&self) -> Result<Vec<TaskSummary>, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut tasks = {
+            let mut statement = transaction.prepare(
+                "SELECT task_json FROM tasks
+                 WHERE status IN ('queued', 'running', 'waiting_for_approval', 'cancelling')
+                 ORDER BY created_at",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            let mut tasks = Vec::new();
+            for row in rows {
+                tasks.push(serde_json::from_str::<TaskSummary>(&row?)?);
+            }
+            tasks
+        };
+        let now = Utc::now();
+        for task in &mut tasks {
+            if !task.status.can_transition_to(TaskStatus::Interrupted) {
+                return Err(StoreError::InvalidTaskTransition {
+                    from: task.status,
+                    to: TaskStatus::Interrupted,
+                });
+            }
+            task.status = TaskStatus::Interrupted;
+            task.finished_at = Some(now);
+            task.is_cancellable = false;
+            transaction.execute(
+                "UPDATE tasks
+                 SET status='interrupted', task_json=?2, finished_at=?3, updated_at=?3
+                 WHERE id=?1",
+                params![
+                    task.id.to_string(),
+                    serde_json::to_string(task)?,
+                    now.to_rfc3339(),
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE approvals SET status='expired'
+                 WHERE task_id=?1 AND status='pending'",
+                [task.id.to_string()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(tasks)
+    }
+
     pub fn transition_task(
         &self,
         task_id: Uuid,
@@ -387,6 +437,83 @@ impl EventStore {
         })
     }
 
+    pub fn approvals_for_session(&self, session_id: Uuid) -> Result<Vec<ApprovalView>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT request_json, status, resolution_json
+             FROM approvals WHERE session_id=?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map([session_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut approvals = Vec::new();
+        for row in rows {
+            let (request, status, resolution) = row?;
+            let status: ApprovalStatus = serde_json::from_value(serde_json::Value::String(status))?;
+            approvals.push(ApprovalView {
+                request: serde_json::from_str(&request)?,
+                can_approve: status == ApprovalStatus::Pending,
+                status,
+                resolution: resolution
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()?,
+            });
+        }
+        Ok(approvals)
+    }
+
+    pub fn pending_approval_for_task(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<ApprovalView>, StoreError> {
+        let connection = self.connection()?;
+        let approval_id = connection
+            .query_row(
+                "SELECT id FROM approvals
+                 WHERE task_id=?1 AND status='pending'
+                 ORDER BY created_at, id LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        approval_id
+            .as_deref()
+            .map(parse_uuid)
+            .transpose()?
+            .map(|approval_id| self.load_approval(approval_id))
+            .transpose()
+    }
+
+    pub fn equivalent_approval_rule(
+        &self,
+        request: &ApprovalRequest,
+    ) -> Result<Option<Uuid>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT request_json, resolution_json FROM approvals
+             WHERE session_id=?1 AND status='approved' AND resolution_json IS NOT NULL
+             ORDER BY resolved_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map([request.session_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (candidate, resolution) = row?;
+            let candidate: ApprovalRequest = serde_json::from_str(&candidate)?;
+            let resolution: ApprovalResolution = serde_json::from_str(&resolution)?;
+            if resolution.choice == ApprovalChoice::ApproveEquivalentForSession
+                && equivalent_approval_requests(&candidate, request)
+            {
+                return Ok(resolution.equivalent_rule_id);
+            }
+        }
+        Ok(None)
+    }
+
     pub fn resolve_approval(
         &self,
         resolution: &ApprovalResolution,
@@ -431,6 +558,17 @@ impl EventStore {
         connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
         Ok(connection)
     }
+}
+
+fn equivalent_approval_requests(left: &ApprovalRequest, right: &ApprovalRequest) -> bool {
+    left.session_id == right.session_id
+        && left.kind == right.kind
+        && left.command_preview == right.command_preview
+        && left.cwd == right.cwd
+        && left.affected_paths == right.affected_paths
+        && left.action_ids == right.action_ids
+        && left.accesses_network == right.accesses_network
+        && left.sandbox_path == right.sandbox_path
 }
 
 struct EventRow {

@@ -47,3 +47,11 @@ test("complete desktop mock workflow", async ({ page }) => {
   await exportDialog.getByRole("button", { name: "Export" }).click();
   await expect(exportDialog).toBeHidden();
 });
+
+test("virtualizes a recovered 10,000 item timeline", async ({ page }) => {
+  await page.goto("/?timeline_items=10000");
+  await expect(page.getByRole("heading", { name: "parser-repair", level: 1 })).toBeVisible();
+  await expect(page.getByText("10,000 items")).toBeVisible();
+  await expect.poll(() => page.locator(".timeline-card").count()).toBeGreaterThan(0);
+  expect(await page.locator(".timeline-card").count()).toBeLessThan(100);
+});

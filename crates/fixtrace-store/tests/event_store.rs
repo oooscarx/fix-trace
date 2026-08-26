@@ -256,6 +256,56 @@ fn approval_resolution_is_compare_and_set() {
 }
 
 #[test]
+fn equivalent_session_approval_matches_the_complete_structured_rule() {
+    let temp = tempdir().unwrap();
+    let store = EventStore::open(temp.path().join("history.sqlite3")).unwrap();
+    let session_id = Uuid::new_v4();
+    let mut request = ApprovalRequest {
+        id: Uuid::new_v4(),
+        session_id,
+        task_id: Uuid::new_v4(),
+        kind: ApprovalKind::ReplayCommand,
+        title: "Replay recorded repair".to_owned(),
+        reason: "Ask always".to_owned(),
+        risk: RiskLevel::Medium,
+        command_preview: Some("cargo test".to_owned()),
+        cwd: Some("worktree".into()),
+        affected_paths: vec!["target".into()],
+        action_ids: vec![1, 2],
+        accesses_network: false,
+        sandbox_path: Some("worktree".into()),
+        requested_scope: ApprovalScope::Once,
+        choices: vec![ApprovalChoice::ApproveEquivalentForSession],
+        created_at: Utc::now(),
+    };
+    store.save_approval(&request).unwrap();
+    let rule_id = Uuid::new_v4();
+    store
+        .resolve_approval(&ApprovalResolution {
+            approval_id: request.id,
+            choice: ApprovalChoice::ApproveEquivalentForSession,
+            status: ApprovalStatus::Approved,
+            resolved_by_client_id: Uuid::new_v4(),
+            resolved_at: Utc::now(),
+            equivalent_rule_id: Some(rule_id),
+        })
+        .unwrap();
+
+    request.id = Uuid::new_v4();
+    request.task_id = Uuid::new_v4();
+    request.title = "A later task".to_owned();
+    request.reason = "The policy would otherwise ask again".to_owned();
+    request.created_at = Utc::now();
+    assert_eq!(
+        store.equivalent_approval_rule(&request).unwrap(),
+        Some(rule_id)
+    );
+
+    request.action_ids = vec![1, 3];
+    assert_eq!(store.equivalent_approval_rule(&request).unwrap(), None);
+}
+
+#[test]
 fn migration_checksum_mismatch_stops_before_ui_tables_are_created() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("history.sqlite3");

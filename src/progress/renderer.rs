@@ -62,6 +62,13 @@ fn render(event: &ProgressEvent) {
         } => eprintln!(
             "[fixtrace] usage: {input_tokens} input + {output_tokens} output tokens, ${cost_usd:.6}"
         ),
+        ProgressEvent::BudgetExceeded {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        } => eprintln!(
+            "[fixtrace] budget exhausted: {input_tokens} input + {output_tokens} output tokens, ${cost_usd:.6}"
+        ),
         ProgressEvent::Cancelled => eprintln!("[fixtrace] cancelled"),
         ProgressEvent::Finished => eprintln!("[fixtrace] finished"),
     }

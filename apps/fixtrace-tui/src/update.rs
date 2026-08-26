@@ -225,12 +225,28 @@ fn key_event(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         KeyCode::PageUp => {
+            if model.follow_tail {
+                let total = model
+                    .session
+                    .as_ref()
+                    .map_or(0, |session| session.timeline.len());
+                let window = usize::from(model.viewport.1).saturating_mul(3).max(64);
+                model.scroll = u16::try_from(total.saturating_sub(window)).unwrap_or(u16::MAX);
+            }
             model.follow_tail = false;
             model.scroll = model.scroll.saturating_sub(10);
             Vec::new()
         }
         KeyCode::PageDown => {
             model.scroll = model.scroll.saturating_add(10);
+            let total = model
+                .session
+                .as_ref()
+                .map_or(0, |session| session.timeline.len());
+            let window = usize::from(model.viewport.1).saturating_mul(3).max(64);
+            if usize::from(model.scroll) >= total.saturating_sub(window) {
+                model.follow_tail = true;
+            }
             Vec::new()
         }
         KeyCode::Char('?') if model.composer_text().is_empty() => {
@@ -286,6 +302,14 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
                 _ => None,
             };
             choice
+                .filter(|choice| {
+                    model.session.as_ref().is_some_and(|session| {
+                        session.approvals.iter().any(|approval| {
+                            approval.request.id == approval_id
+                                && approval.request.choices.contains(choice)
+                        })
+                    })
+                })
                 .map(|choice| Effect::RespondApproval {
                     approval_id,
                     choice,

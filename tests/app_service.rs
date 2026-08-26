@@ -3,9 +3,17 @@ use std::fs;
 use fixtrace::{
     application::{
         AppCommand, AppResponse, AppServiceOptions, FixTraceAppService, FixTraceApplication,
+        FixTraceProtocolApplication,
     },
     progress::ProgressEvent,
 };
+use fixtrace_protocol::{
+    AppEvent, AppRequest, AppResponsePayload, ApprovalChoice, ApprovalKind, ApprovalRequest,
+    ApprovalScope, ApprovalStatus, ItemStatus, Notice, NoticeItem, NoticeLevel, PageRequest,
+    RiskLevel, SessionSnapshotRequest, TaskKind, TaskStatus, TaskSummary, TimelineItem,
+    TimelineItemHeader,
+};
+use fixtrace_store::EventStore;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
@@ -129,4 +137,152 @@ async fn app_service_runs_independent_sessions_concurrently() {
         started.elapsed() < std::time::Duration::from_millis(1_800),
         "independent sessions were serialized instead of running concurrently"
     );
+}
+
+#[tokio::test]
+async fn app_service_restart_marks_orphaned_tasks_interrupted() {
+    let temp = tempdir().unwrap();
+    let state_dir = temp.path().join("state");
+    let database_path = state_dir.join("history.sqlite3");
+    let store = EventStore::open(&database_path).unwrap();
+    let session_id = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let task = TaskSummary {
+        id: uuid::Uuid::new_v4(),
+        session_id: Some(session_id),
+        operation_id: uuid::Uuid::new_v4(),
+        kind: TaskKind::AgentTurn,
+        status: TaskStatus::Running,
+        title: "Interrupted fixture".to_owned(),
+        created_at: now,
+        started_at: Some(now),
+        finished_at: None,
+        progress_ratio: Some(0.5),
+        is_cancellable: true,
+        supports_steer: true,
+    };
+    store.save_task(&task).unwrap();
+    let approval = ApprovalRequest {
+        id: uuid::Uuid::new_v4(),
+        session_id,
+        task_id: task.id,
+        kind: ApprovalKind::ReplayCommand,
+        title: "Dead task approval".to_owned(),
+        reason: "Must expire during recovery".to_owned(),
+        risk: RiskLevel::Low,
+        command_preview: Some("cargo test".to_owned()),
+        cwd: None,
+        affected_paths: Vec::new(),
+        action_ids: Vec::new(),
+        accesses_network: false,
+        sandbox_path: None,
+        requested_scope: ApprovalScope::Once,
+        choices: vec![ApprovalChoice::ApproveOnce, ApprovalChoice::Deny],
+        created_at: now,
+    };
+    store.save_approval(&approval).unwrap();
+
+    let _service = FixTraceAppService::start(
+        AppServiceOptions {
+            state_dir: Some(state_dir),
+            config_path: None,
+            initialize_event_store: true,
+        },
+        CancellationToken::new(),
+    )
+    .unwrap();
+
+    let recovered = store.load_task(task.id).unwrap();
+    assert_eq!(recovered.status, TaskStatus::Interrupted);
+    assert!(recovered.finished_at.is_some());
+    assert!(!recovered.is_cancellable);
+    let expired = store.load_approval(approval.id).unwrap();
+    assert_eq!(expired.status, ApprovalStatus::Expired);
+    assert!(!expired.can_approve);
+    let events = store.load_after(Some(session_id), 0, 100).unwrap();
+    assert!(events.events.iter().any(|event| {
+        matches!(
+            &event.payload,
+            AppEvent::TaskFailed(failure)
+                if failure.task.id == task.id
+                    && failure.task.status == TaskStatus::Interrupted
+                    && failure.error.retryable
+        )
+    }));
+}
+
+#[tokio::test]
+async fn session_snapshot_recovers_past_a_single_ten_thousand_event_batch() {
+    let temp = tempdir().unwrap();
+    let state_dir = temp.path().join("state");
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("fixture.txt"), "broken\n").unwrap();
+    let service = FixTraceAppService::start(
+        AppServiceOptions {
+            state_dir: Some(state_dir.clone()),
+            config_path: None,
+            initialize_event_store: true,
+        },
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let created = service
+        .execute(AppCommand::InitializeSession {
+            project,
+            oracle: "false".to_owned(),
+            title: Some("large timeline".to_owned()),
+        })
+        .await
+        .unwrap();
+    let AppResponse::SessionInitialized { session } = created else {
+        panic!("InitializeSession returned the wrong response");
+    };
+    let store = EventStore::open(state_dir.join("history.sqlite3")).unwrap();
+    let now = chrono::Utc::now();
+    for index in 0..10_005_u64 {
+        store
+            .append(
+                Some(session.id),
+                None,
+                AppEvent::ItemCompleted(TimelineItem::Notice(NoticeItem {
+                    header: TimelineItemHeader {
+                        id: uuid::Uuid::new_v4(),
+                        status: ItemStatus::Completed,
+                        started_at: now,
+                        completed_at: Some(now),
+                        parent_id: None,
+                        artifacts: Vec::new(),
+                        entities: Vec::new(),
+                    },
+                    notice: Notice {
+                        code: format!("fixture_{index}"),
+                        level: NoticeLevel::Info,
+                        title: "Fixture".to_owned(),
+                        message: format!("timeline item {index}"),
+                    },
+                })),
+            )
+            .unwrap();
+    }
+
+    let response = service
+        .execute_protocol(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            AppRequest::SessionGetSnapshot(SessionSnapshotRequest {
+                session_id: session.id,
+                timeline_page: PageRequest {
+                    cursor: None,
+                    limit: Some(10_000),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let AppResponsePayload::SessionSnapshot(snapshot) = response else {
+        panic!("session/get_snapshot returned the wrong response");
+    };
+    assert_eq!(snapshot.session.timeline.len(), 10_005);
+    assert_eq!(snapshot.through_sequence, 10_006);
 }

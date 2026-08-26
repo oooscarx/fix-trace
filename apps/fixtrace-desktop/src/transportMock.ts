@@ -26,6 +26,16 @@ export class MockTransport implements FixTraceTransport {
   ]);
   private config = structuredClone(configSummary);
 
+  constructor() {
+    const requested = Number(
+      new URLSearchParams(globalThis.location?.search ?? "").get("timeline_items"),
+    );
+    if (Number.isInteger(requested) && requested > 0 && requested <= 10_000) {
+      const view = this.views.get(seedSession.summary.id);
+      if (view) view.timeline = stressTimeline(requested);
+    }
+  }
+
   async initialize(): Promise<InitializeResponse> {
     return { ...initialized, config_summary: structuredClone(this.config) };
   }
@@ -765,4 +775,19 @@ function applyConfig(
   };
   const key = mapping[update.key];
   if (key) Object.assign(config, { [key]: update.value.value });
+}
+
+function stressTimeline(count: number): SessionView["timeline"] {
+  return Array.from({ length: count }, (_, index) => ({
+    type: "notice" as const,
+    item: {
+      header: header(`stress-item-${index}`, "completed"),
+      notice: {
+        code: "stress_fixture",
+        level: "info" as const,
+        title: "Persisted timeline item",
+        message: `Recovered event ${index + 1}`,
+      },
+    },
+  }));
 }

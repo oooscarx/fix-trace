@@ -37,7 +37,7 @@ pub struct EventGap {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Serialize, TS)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AppEvent {
     SessionCreated(SessionSummary),
@@ -59,6 +59,56 @@ pub enum AppEvent {
     Notice(Notice),
     Error(AppErrorView),
     EventGap(EventGap),
+    #[ts(skip)]
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for AppEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let event_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| D::Error::custom("AppEvent requires a string `type` field"))?;
+        let data = value
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        macro_rules! event {
+            ($variant:ident, $type:ty) => {
+                serde_json::from_value::<$type>(data)
+                    .map(Self::$variant)
+                    .map_err(D::Error::custom)
+            };
+        }
+        match event_type {
+            "session_created" => event!(SessionCreated, SessionSummary),
+            "session_updated" => event!(SessionUpdated, SessionSummary),
+            "task_started" => event!(TaskStarted, TaskSummary),
+            "task_progress" => event!(TaskProgress, TaskProgress),
+            "task_completed" => event!(TaskCompleted, TaskResult),
+            "task_failed" => event!(TaskFailed, TaskFailure),
+            "task_cancelled" => event!(TaskCancelled, TaskSummary),
+            "item_started" => event!(ItemStarted, TimelineItem),
+            "item_delta" => event!(ItemDelta, ItemDelta),
+            "item_completed" => event!(ItemCompleted, TimelineItem),
+            "approval_requested" => event!(ApprovalRequested, ApprovalRequest),
+            "approval_resolved" => event!(ApprovalResolved, ApprovalResolution),
+            "usage_updated" => event!(UsageUpdated, UsageSummary),
+            "budget_warning" => event!(BudgetWarning, BudgetWarning),
+            "diagnosis_updated" => event!(DiagnosisUpdated, DiagnosisView),
+            "artifact_created" => event!(ArtifactCreated, ArtifactSummary),
+            "notice" => event!(Notice, Notice),
+            "error" => event!(Error, AppErrorView),
+            "event_gap" => event!(EventGap, EventGap),
+            _ => Ok(Self::Unknown),
+        }
+    }
 }
 
 impl AppEvent {
@@ -83,6 +133,7 @@ impl AppEvent {
             Self::Notice(_) => "notice",
             Self::Error(_) => "error",
             Self::EventGap(_) => "event_gap",
+            Self::Unknown => "unknown",
         }
     }
 

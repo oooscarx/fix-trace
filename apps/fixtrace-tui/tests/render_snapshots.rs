@@ -30,6 +30,31 @@ fn too_small_terminal_snapshot() {
 }
 
 #[test]
+fn ten_thousand_item_timeline_renders_a_bounded_window() {
+    let mut model = fixture_model();
+    let template = model.session.as_ref().unwrap().timeline[0].clone();
+    model.session.as_mut().unwrap().timeline = (0..10_000)
+        .map(|index| {
+            let mut item = template.clone();
+            if let TimelineItem::UserMessage(message) = &mut item {
+                message.header.id = Uuid::from_u128(index + 1);
+                message.text = format!("Recovered item {}", index + 1);
+            }
+            item
+        })
+        .collect();
+    let started = std::time::Instant::now();
+    let backend = TestBackend::new(100, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    let rendered = buffer_text(terminal.backend(), 100, 32);
+    assert!(rendered.contains("/ 10000"));
+    assert!(rendered.contains("Recovered item 10000"));
+    assert!(!rendered.contains("Recovered item 1 "));
+}
+
+#[test]
 fn server_delta_updates_the_running_agent_item() {
     let mut model = fixture_model();
     let event = EventEnvelope {

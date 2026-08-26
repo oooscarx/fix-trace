@@ -89,6 +89,26 @@ async fn connection_requires_exactly_one_initialize_before_other_requests() {
 }
 
 #[tokio::test]
+async fn duplicate_request_ids_are_rejected_without_reexecuting() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connection = ConnectionState::new(application(temp.path()));
+    connection
+        .handle_request(envelope(initialized_request()))
+        .await;
+    let request = envelope(AppRequest::ConfigGet(fixtrace_protocol::EmptyRequest {}));
+    let first = connection.handle_request(request.clone()).await;
+    let ServerFrame::Response(first) = first.frame else {
+        panic!("expected response frame")
+    };
+    assert!(first.error.is_none());
+
+    assert_eq!(
+        error_code(connection.handle_request(request).await),
+        ErrorCode::Conflict
+    );
+}
+
+#[tokio::test]
 async fn incompatible_protocol_returns_an_error_and_closes_the_connection() {
     let temp = tempfile::tempdir().unwrap();
     let mut connection = ConnectionState::new(application(temp.path()));

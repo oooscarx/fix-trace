@@ -44,23 +44,23 @@ impl TaskStatus {
     pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Queued, Self::Running | Self::Cancelled | Self::Failed)
-                | (
-                    Self::Running,
-                    Self::WaitingForApproval
-                        | Self::Cancelling
-                        | Self::Completed
-                        | Self::Failed
-                        | Self::Interrupted
-                )
-                | (
-                    Self::WaitingForApproval,
-                    Self::Running | Self::Cancelling | Self::Failed | Self::Interrupted
-                )
-                | (
-                    Self::Cancelling,
-                    Self::Cancelled | Self::Failed | Self::Interrupted
-                )
+            (
+                Self::Queued,
+                Self::Running | Self::Cancelled | Self::Failed | Self::Interrupted,
+            ) | (
+                Self::Running,
+                Self::WaitingForApproval
+                    | Self::Cancelling
+                    | Self::Completed
+                    | Self::Failed
+                    | Self::Interrupted
+            ) | (
+                Self::WaitingForApproval,
+                Self::Running | Self::Cancelling | Self::Failed | Self::Interrupted
+            ) | (
+                Self::Cancelling,
+                Self::Cancelled | Self::Failed | Self::Interrupted
+            )
         )
     }
 }
@@ -114,6 +114,7 @@ mod tests {
         assert!(TaskStatus::Running.can_transition_to(TaskStatus::Cancelling));
         assert!(TaskStatus::Cancelling.can_transition_to(TaskStatus::Cancelled));
         assert!(TaskStatus::Running.can_transition_to(TaskStatus::Interrupted));
+        assert!(TaskStatus::Queued.can_transition_to(TaskStatus::Interrupted));
 
         assert!(!TaskStatus::Queued.can_transition_to(TaskStatus::Completed));
         assert!(!TaskStatus::Completed.can_transition_to(TaskStatus::Running));
