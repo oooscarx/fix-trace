@@ -9,6 +9,7 @@ license = "MIT"
 [workspace]
 members = [
     ".",
+    "apps/fixtrace-server",
     "crates/fixtrace-client",
     "crates/fixtrace-presenter",
     "crates/fixtrace-protocol",

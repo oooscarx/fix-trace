@@ -7,8 +7,12 @@ use fixtrace_protocol::{
     InitializeRequest, InitializeResponse, SubscribeRequest,
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
+
+mod websocket;
+
+pub use websocket::WebSocketClient;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -20,6 +24,8 @@ pub enum ClientError {
     EventGap(EventGap),
     #[error("FixTrace event stream closed")]
     EventStreamClosed,
+    #[error("FixTrace transport error: {0}")]
+    Transport(String),
 }
 
 #[async_trait]
@@ -133,7 +139,7 @@ impl AppClient for InProcessClient {
         Ok(EventSubscription {
             session_id: Some(request.session_id),
             pending,
-            live,
+            live: EventSource::InProcess(live),
             last_sequence: request.after_sequence.unwrap_or(0),
             initial_gap: gap,
         })
@@ -143,12 +149,31 @@ impl AppClient for InProcessClient {
 pub struct EventSubscription {
     session_id: Option<Uuid>,
     pending: VecDeque<EventEnvelope>,
-    live: broadcast::Receiver<EventEnvelope>,
+    live: EventSource,
     last_sequence: u64,
     initial_gap: Option<EventGap>,
 }
 
+enum EventSource {
+    InProcess(broadcast::Receiver<EventEnvelope>),
+    External(mpsc::Receiver<Result<EventEnvelope, ClientError>>),
+}
+
 impl EventSubscription {
+    pub(crate) fn external(
+        session_id: Uuid,
+        after_sequence: u64,
+        receiver: mpsc::Receiver<Result<EventEnvelope, ClientError>>,
+    ) -> Self {
+        Self {
+            session_id: Some(session_id),
+            pending: VecDeque::new(),
+            live: EventSource::External(receiver),
+            last_sequence: after_sequence,
+            initial_gap: None,
+        }
+    }
+
     pub fn last_sequence(&self) -> u64 {
         self.last_sequence
     }
@@ -161,21 +186,28 @@ impl EventSubscription {
             return self.accept(event);
         }
         loop {
-            let event = match self.live.recv().await {
-                Ok(event) => event,
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Err(ClientError::EventStreamClosed);
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    return Err(ClientError::EventGap(EventGap {
-                        stream_id: Uuid::nil(),
-                        expected_sequence: self.last_sequence.saturating_add(1),
-                        available_from_sequence: self.last_sequence.saturating_add(1),
-                        high_watermark: self.last_sequence,
-                        reason: "InProcess receiver lagged behind the bounded live buffer"
-                            .to_owned(),
-                    }));
-                }
+            let event = match &mut self.live {
+                EventSource::InProcess(live) => match live.recv().await {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(ClientError::EventStreamClosed);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        return Err(ClientError::EventGap(EventGap {
+                            stream_id: Uuid::nil(),
+                            expected_sequence: self.last_sequence.saturating_add(1),
+                            available_from_sequence: self.last_sequence.saturating_add(1),
+                            high_watermark: self.last_sequence,
+                            reason: "InProcess receiver lagged behind the bounded live buffer"
+                                .to_owned(),
+                        }));
+                    }
+                },
+                EventSource::External(live) => match live.recv().await {
+                    Some(Ok(event)) => event,
+                    Some(Err(error)) => return Err(error),
+                    None => return Err(ClientError::EventStreamClosed),
+                },
             };
             if event.session_id != self.session_id || event.sequence <= self.last_sequence {
                 continue;

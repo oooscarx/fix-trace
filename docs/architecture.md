@@ -5,7 +5,10 @@
 ```mermaid
 flowchart LR
     U[CLI compatibility adapter] --> AS[FixTrace App Service]
-    FT[Future TUI / GUI / Server] -. same interface .-> AS
+    TUI[TUI / GUI clients] --> C[InProcess or WebSocket client]
+    C --> AS
+    C --> SV[stdio / WebSocket App Server]
+    SV --> AS
     AS --> W[Session Workflow]
     AS --> H[(SQLite core history)]
     AS --> ES[(Versioned event/task store)]
@@ -102,6 +105,17 @@ InProcess client
 
 每个 Session 最多一个 mutation task；Task 有独立 CancellationToken，运行中的命令/Trial 能由 `task/cancel` 触发清理。事件先持久化再 broadcast，订阅者用 sequence 去重，慢订阅者进入 EventGap/snapshot 恢复，而不是拖住任务。
 
+U3 提供两个外部传输。stdio 使用 8 MiB 上限的 JSONL codec，stdout 与日志严格分离；WebSocket 使用 Axum upgrade、Bearer capability token、loopback 默认绑定和有界读写缓冲。每个外部连接各自维护 initialize/client ID 与 Session subscription，所有连接仍共享同一个 App Service、Task supervisor 和 EventStore：
+
+```text
+stdio connection ─┐
+WS client A ──────┼─> typed protocol router ─> FixTraceAppService
+WS client B ──────┘          │                         │
+                     catch-up from SQLite <─ persist before broadcast
+```
+
+`fixtrace-client::WebSocketClient` 通过有界 channel 向 UI 交付事件；断线时指数退避，并从最后 sequence 恢复。App Server binary 在状态目录持有独占 writer lock，防止两个服务器同时成为该数据库的权威写者。传输的具体安全边界见 [App Server](app-server.md)。
+
 受控 shell 暂时作为兼容命令由 App Service 启动，因而旧脚本无行为变化；未来 TUI/GUI 不复用其 stdin/stdout 循环，而使用 U2 的类型化 message/action 命令。
 
 ## 主要模块
@@ -121,5 +135,6 @@ InProcess client
 | `fixtrace-protocol` | `fixtrace/1` 的 request/response/event/timeline/approval/view 与 TS 生成 |
 | `fixtrace-store` | 显式 migration、Task/Approval/Event 持久化与 catch-up |
 | `fixtrace-presenter` | Rust 共享派生字段和人类可读 summary |
-| `fixtrace-client` | transport-neutral AppClient 与 InProcess catch-up/live 合并 |
+| `fixtrace-client` | transport-neutral AppClient、InProcess 合并和可重连 WebSocket client |
+| `fixtrace-server` | initialize-first 协议路由、stdio JSONL、认证 WebSocket 与 writer lock |
 | `progress` | 旧工作流进度兼容层；通过 observer 映射为持久化 AppEvent |

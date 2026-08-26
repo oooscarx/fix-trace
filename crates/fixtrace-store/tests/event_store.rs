@@ -147,6 +147,41 @@ fn missing_persisted_sequence_is_reported_as_a_gap() {
 }
 
 #[test]
+fn missing_persisted_tail_is_reported_as_a_gap() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.sqlite3");
+    let store = EventStore::open(&path).unwrap();
+    let session_id = Uuid::new_v4();
+    for index in 0..3 {
+        store
+            .append(
+                Some(session_id),
+                None,
+                AppEvent::Notice(Notice {
+                    code: "tail_gap_fixture".to_owned(),
+                    level: NoticeLevel::Info,
+                    title: "Tail gap fixture".to_owned(),
+                    message: index.to_string(),
+                }),
+            )
+            .unwrap();
+    }
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "DELETE FROM app_events WHERE session_id=?1 AND sequence>1",
+            [session_id.to_string()],
+        )
+        .unwrap();
+
+    let catch_up = store.load_after(Some(session_id), 1, 100).unwrap();
+    let gap = catch_up.gap.expect("deleted tail should produce a gap");
+    assert_eq!(gap.expected_sequence, 2);
+    assert_eq!(gap.available_from_sequence, 4);
+    assert_eq!(gap.high_watermark, 3);
+}
+
+#[test]
 fn task_transitions_are_validated_by_the_store() {
     let temp = tempdir().unwrap();
     let store = EventStore::open(temp.path().join("history.sqlite3")).unwrap();

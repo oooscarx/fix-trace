@@ -168,6 +168,24 @@ fixtrace --state-dir /tmp/my-fixtrace history list
 
 也可以设置 `FIXTRACE_HOME`。
 
+## App Server
+
+stdio JSONL：
+
+```bash
+cargo run -p fixtrace-server -- --listen stdio
+```
+
+带 capability token 的本地 WebSocket：
+
+```bash
+cargo run -p fixtrace-server -- \
+  --listen ws://127.0.0.1:4765 \
+  --token-file .local/fixtrace-server.token
+```
+
+WebSocket 默认只允许 loopback，token 不进入 URL、日志、数据库或导出。协议、认证、重连和多客户端说明见 [App Server 文档](docs/app-server.md)。
+
 ## 测试与质量检查
 
 ```bash
@@ -195,6 +213,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 - [实施计划](docs/implementation-plan.md)
 - [设计文档](docs/design.md)
 - [系统架构](docs/architecture.md)
+- [App Server](docs/app-server.md)
+- [UI 协议](docs/protocol.md)
 - [课程要求映射](docs/requirements-matrix.md)
 - [AI 开发开销空白模板](docs/development-cost-template.csv)
 

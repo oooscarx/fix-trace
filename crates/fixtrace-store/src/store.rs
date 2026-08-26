@@ -212,11 +212,15 @@ impl EventStore {
             events.push(row?.into_envelope(stream_id)?);
         }
         let expected = after_sequence.saturating_add(1);
-        let gap = events.first().and_then(|event| {
-            (event.sequence != expected).then(|| EventGap {
+        let available_from_sequence = events
+            .first()
+            .map(|event| event.sequence)
+            .or_else(|| (after_sequence < high_watermark).then(|| high_watermark + 1));
+        let gap = available_from_sequence.and_then(|available| {
+            (available != expected).then(|| EventGap {
                 stream_id,
                 expected_sequence: expected,
-                available_from_sequence: event.sequence,
+                available_from_sequence: available,
                 high_watermark,
                 reason: "persisted event sequence is not contiguous".to_owned(),
             })

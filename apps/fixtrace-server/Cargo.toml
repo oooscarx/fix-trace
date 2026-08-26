@@ -1,0 +1,35 @@
+[package]
+name = "fixtrace-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Local stdio and WebSocket App Server for FixTrace"
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+fixtrace = { path = "../.." }
+fixtrace-protocol = { path = "../../crates/fixtrace-protocol" }
+fs2 = "0.4.3"
+futures-util = "0.3.34"
+getrandom = "0.4.3"
+hex = "0.4"
+serde = "1.0"
+serde_json = "1.0"
+subtle = "2.6"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["v4"] }
+
+[dev-dependencies]
+fixtrace-client = { path = "../../crates/fixtrace-client" }
+fixtrace-store = { path = "../../crates/fixtrace-store" }
+tempfile = "3.23"
+tokio = { version = "1.47", features = ["time"] }
+tokio-tungstenite = "0.30.0"

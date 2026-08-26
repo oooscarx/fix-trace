@@ -84,6 +84,8 @@ pub struct EventEnvelope {
 
 InProcess transport 已实现相同语义：先注册有界 live receiver，再读取订阅时的 SQLite high watermark，最后按 sequence 合并并去重，因此 catch-up 与 live 之间没有竞态窗口。客户端未 initialize 时拒绝请求；同一 `operation_id` 的 Task 重试返回原 Task。
 
+stdio 与 WebSocket transport 使用同一 router。stdio 的每行和 WebSocket 的每个 text message 都恰好承载一个 frame，最大 8 MiB。WebSocket 订阅客户端断线后以最后 sequence 重连；认证、缓冲上限和 writer lock 见 [App Server](app-server.md)。
+
 ## Timeline 与可显示内容
 
 Timeline item 是结构化 tagged enum，不是大段 Markdown。每项有稳定 ID、状态、起止时间、父项、artifact 和实体引用。类型包括：
