@@ -40,7 +40,7 @@ pub struct InitializeRequest {
     pub capabilities: ClientCapabilities,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 pub struct InitializeResponse {
     pub protocol_version: String,
     pub server_version: String,

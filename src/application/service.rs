@@ -86,7 +86,7 @@ impl FixTraceAppService {
         let (commands, receiver) = mpsc::channel(32);
         let task_steer_receivers = Arc::new(Mutex::new(HashMap::new()));
         let actor = AppServiceActor {
-            state_paths,
+            state_paths: state_paths.clone(),
             config_path,
             config,
             progress: progress.clone(),

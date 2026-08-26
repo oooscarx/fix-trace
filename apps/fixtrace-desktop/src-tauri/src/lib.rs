@@ -144,6 +144,7 @@ fn unsubscribe_events(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = tauri::async_runtime::block_on(async {
                 let paths = StatePaths::discover(None)?;

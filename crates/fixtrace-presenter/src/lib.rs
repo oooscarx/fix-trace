@@ -21,6 +21,7 @@ pub enum SourceSessionStatus {
 pub struct SessionSummaryInput {
     pub id: Uuid,
     pub project_name: String,
+    pub project_path: String,
     pub status: SourceSessionStatus,
     pub active_task_id: Option<Uuid>,
     pub parent_session_id: Option<Uuid>,
@@ -33,6 +34,7 @@ pub fn present_session_summary(input: SessionSummaryInput) -> SessionSummary {
     SessionSummary {
         id: input.id,
         project_name: input.project_name,
+        project_path: input.project_path,
         status: match input.status {
             SourceSessionStatus::Recording => SessionStatusView::Recording,
             SourceSessionStatus::ReadyForAnalysis => SessionStatusView::ReadyForAnalysis,
@@ -57,6 +59,9 @@ pub struct ActionPresentationInput {
     pub cwd: String,
     pub summary: String,
     pub replayable: bool,
+    pub reads: Vec<String>,
+    pub writes: Vec<String>,
+    pub resource_access_opaque: bool,
     pub note: Option<String>,
 }
 
@@ -69,6 +74,9 @@ pub fn present_action(input: ActionPresentationInput) -> ActionView {
         summary: input.summary,
         replayable: input.replayable,
         can_rerun: input.replayable,
+        reads: input.reads,
+        writes: input.writes,
+        resource_access_opaque: input.resource_access_opaque,
         note: input.note,
     }
 }

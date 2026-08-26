@@ -99,16 +99,30 @@ pub struct Notice {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 pub struct PublicConfigSummary {
     pub provider: String,
     pub endpoint: String,
+    #[serde(default)]
+    pub api_key_env: String,
     pub model: String,
     pub api_style: String,
     pub context_length: u64,
     pub reasoning_mode: String,
+    #[serde(default)]
+    pub max_agent_steps: u64,
+    #[serde(default)]
+    pub input_per_million_usd: f64,
+    #[serde(default)]
+    pub output_per_million_usd: f64,
+    #[serde(default)]
+    pub max_total_tokens: u64,
+    #[serde(default)]
+    pub max_cost_usd: f64,
     pub replay_repetitions: u32,
     pub oracle_timeout_secs: u64,
+    #[serde(default)]
+    pub include_target: bool,
     pub has_api_key: bool,
     pub approval_policy: crate::ApprovalPolicy,
 }

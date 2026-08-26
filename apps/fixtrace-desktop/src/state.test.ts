@@ -14,6 +14,7 @@ function stateWithAgent(): AppState {
       summary: {
         id: sessionId,
         project_name: "fixture",
+        project_path: "/tmp/fixture",
         status: "analyzed",
         active_task_id: null,
         parent_session_id: null,

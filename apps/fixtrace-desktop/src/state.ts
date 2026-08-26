@@ -49,14 +49,16 @@ export const initialState: AppState = {
 
 export type Action =
   | { type: "initialized"; initialized: InitializeResponse }
-  | { type: "sessions"; sessions: SessionSummary[] }
+  | { type: "sessions"; sessions: SessionSummary[]; append?: boolean }
   | { type: "snapshot"; snapshot: SessionSnapshot }
   | { type: "task"; task: TaskSummary }
+  | { type: "config"; config: InitializeResponse["config_summary"] }
   | { type: "select"; sessionId: string }
   | { type: "event"; event: EventEnvelope }
   | { type: "tab"; tab: InspectorTab }
   | { type: "status"; status: string }
   | { type: "error"; error: string }
+  | { type: "offline"; error: string }
   | { type: "clear_error" };
 
 export function reducer(state: AppState, action: Action): AppState {
@@ -70,7 +72,10 @@ export function reducer(state: AppState, action: Action): AppState {
         error: null,
       };
     case "sessions": {
-      const sessions = [...action.sessions].sort((a, b) =>
+      const combined = action.append
+        ? action.sessions.reduce(upsertSession, state.sessions)
+        : action.sessions;
+      const sessions = [...combined].sort((a, b) =>
         b.updated_at.localeCompare(a.updated_at),
       );
       return {
@@ -114,6 +119,15 @@ export function reducer(state: AppState, action: Action): AppState {
         { ...state, status: `${action.task.title} · ${action.task.status}` },
         action.task,
       );
+    case "config":
+      return state.initialized
+        ? {
+            ...state,
+            initialized: { ...state.initialized, config_summary: action.config },
+            status: "Settings saved",
+            error: null,
+          }
+        : state;
     case "event":
       return applyEvent(state, action.event);
     case "tab":
@@ -121,6 +135,12 @@ export function reducer(state: AppState, action: Action): AppState {
     case "status":
       return { ...state, status: action.status, error: null };
     case "error":
+      return {
+        ...state,
+        error: action.error,
+        status: action.error,
+      };
+    case "offline":
       return {
         ...state,
         error: action.error,
@@ -240,6 +260,8 @@ function applyEvent(state: AppState, event: EventEnvelope): AppState {
       return { ...base, status: payload.data.message };
     case "artifact_created":
       return { ...base, refreshVersion: state.refreshVersion + 1 };
+    default:
+      return base;
   }
 }
 

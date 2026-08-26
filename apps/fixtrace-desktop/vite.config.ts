@@ -16,7 +16,9 @@ export default defineConfig({
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
   },
   test: {
+    exclude: ["e2e/**", "node_modules/**"],
     environment: "jsdom",
+    environmentOptions: { jsdom: { url: "http://localhost/" } },
     setupFiles: ["./src/test/setup.ts"],
     css: true,
   },

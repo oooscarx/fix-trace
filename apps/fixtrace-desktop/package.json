@@ -7,19 +7,26 @@
     "dev": "vite",
     "dev:mock": "VITE_FIXTRACE_MOCK=1 vite",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "lint": "oxlint src e2e --deny-warnings",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e": "playwright test",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
+    "react-virtuoso": "^4.18.12",
     "rehype-sanitize": "6.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tauri-apps/cli": "2.11.4",
+    "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "16.3.2",
     "@testing-library/user-event": "14.6.6",
     "@types/node": "26.3.0",
@@ -27,6 +34,7 @@
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.0",
     "jsdom": "29.1.1",
+    "oxlint": "^1.80.0",
     "typescript": "7.0.2",
     "vite": "8.2.2",
     "vitest": "4.1.11"

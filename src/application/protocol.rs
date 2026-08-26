@@ -1,18 +1,26 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
+    path::{Component, Path, PathBuf},
+    time::Instant,
+};
 
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::Utc;
 use fixtrace_presenter::{SessionViewInput, present_session};
 use fixtrace_protocol::{
     ActionListResponse, AgentMessageDelta, AgentMessageItem, AppErrorView, AppEvent, AppRequest,
-    AppResponsePayload, ArtifactSummary, ConfigValue, ConnectionTestResponse, DependencyGraphView,
-    DiffFileView, DiffView, EmptyRequest, EntityKind, EntityRef, ErrorCode, EventBatch,
-    EventEnvelope, InitializeRequest, InitializeResponse, ItemDelta, ItemStatus, Notice,
-    NoticeLevel, PROTOCOL_VERSION, PageInfo, PublicConfigSummary, ServerCapabilities,
-    SessionListResponse, SessionSnapshot, SubscriptionStarted, TaskFailure, TaskInput,
-    TaskProgress, TaskResult, TaskStatus, TaskSummary, TimelineItem, TimelineItemHeader,
+    AppResponsePayload, ArtifactSummary, ConfigValue, ConnectionTestRequest,
+    ConnectionTestResponse, DependencyGraphView, DiffFileView, DiffView, EmptyRequest, EntityKind,
+    EntityRef, ErrorCode, EventBatch, EventEnvelope, InitializeRequest, InitializeResponse,
+    ItemDelta, ItemStatus, Notice, NoticeLevel, PROTOCOL_VERSION, PageInfo, PublicConfigSummary,
+    ServerCapabilities, SessionListResponse, SessionSnapshot, SubscriptionStarted, TaskFailure,
+    TaskInput, TaskProgress, TaskResult, TaskStatus, TaskSummary, TimelineItem, TimelineItemHeader,
     ToolCallItem, TrialItem, TrialListResponse, UserMessageItem,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -21,6 +29,7 @@ use crate::{
     agent::diagnosis::Diagnosis,
     application::{AppCommand, AppResponse, FixTraceAppService, FixTraceApplication},
     config::FixTraceConfig,
+    domain::action::ArtifactRef,
     domain::snapshot::SnapshotManifest,
     error::AppError,
     llm::usage::UsageSummary as CoreUsageSummary,
@@ -450,23 +459,66 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                     message: "approval resolved".to_owned(),
                 })
             }
-            AppRequest::ConfigTestConnection(_) => {
-                Ok(AppResponsePayload::ConnectionTest(ConnectionTestResponse {
-                    ok: false,
-                    model: None,
-                    latency_ms: 0,
-                    message: "connection testing is enabled in the App Server milestone".to_owned(),
-                }))
-            }
+            AppRequest::ConfigTestConnection(request) => Ok(AppResponsePayload::ConnectionTest(
+                self.test_connection(request).await,
+            )),
             AppRequest::ArtifactList(request) => {
-                self.session_detail(request.session_id).await?;
-                Ok(AppResponsePayload::ArtifactList {
-                    artifacts: Vec::<ArtifactSummary>::new(),
-                    page: PageInfo {
-                        next_cursor: None,
-                        has_more: false,
+                let detail = self.session_detail(request.session_id).await?;
+                let artifacts = self.artifacts_for_session(&detail)?;
+                let (artifacts, page) = paginate(
+                    artifacts
+                        .into_iter()
+                        .map(|artifact| artifact.summary)
+                        .collect(),
+                    &request.page,
+                )?;
+                Ok(AppResponsePayload::ArtifactList { artifacts, page })
+            }
+            AppRequest::ArtifactRead(request) => {
+                let artifact = self.find_artifact(request.artifact_id).await?;
+                let mut file = File::open(&artifact.path).map_err(|error| {
+                    AppErrorView::new(
+                        ErrorCode::Internal,
+                        format!("cannot open artifact: {error}"),
+                    )
+                })?;
+                let file_size = file
+                    .metadata()
+                    .map_err(|error| {
+                        AppErrorView::new(
+                            ErrorCode::Internal,
+                            format!("cannot inspect artifact: {error}"),
+                        )
+                    })?
+                    .len();
+                let offset = request.offset.min(file_size);
+                file.seek(SeekFrom::Start(offset)).map_err(|error| {
+                    AppErrorView::new(
+                        ErrorCode::Internal,
+                        format!("cannot seek artifact: {error}"),
+                    )
+                })?;
+                let limit = usize::try_from(request.validated_limit())
+                    .expect("artifact read limit fits usize");
+                let mut bytes = vec![0_u8; limit];
+                let read = file.read(&mut bytes).map_err(|error| {
+                    AppErrorView::new(
+                        ErrorCode::Internal,
+                        format!("cannot read artifact: {error}"),
+                    )
+                })?;
+                bytes.truncate(read);
+                let next_offset = offset.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+                Ok(AppResponsePayload::Artifact(
+                    fixtrace_protocol::ArtifactChunk {
+                        artifact_id: artifact.summary.id,
+                        offset,
+                        next_offset,
+                        eof: next_offset >= file_size,
+                        bytes_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        sha256: artifact.summary.sha256,
                     },
-                })
+                ))
             }
             AppRequest::MessageSend(request) => self
                 .start_task(
@@ -478,7 +530,7 @@ impl FixTraceProtocolApplication for FixTraceAppService {
                 )
                 .await
                 .map(AppResponsePayload::Task),
-            AppRequest::SessionDelete(_) | AppRequest::ArtifactRead(_) => Err(AppErrorView::new(
+            AppRequest::SessionDelete(_) => Err(AppErrorView::new(
                 ErrorCode::InvalidRequest,
                 "request is defined by the protocol but is not enabled in this milestone",
             )),
@@ -510,6 +562,207 @@ impl FixTraceAppService {
             return Err(invariant_error());
         };
         toml::from_str(&toml).map_err(|_| invariant_error())
+    }
+
+    async fn test_connection(&self, request: ConnectionTestRequest) -> ConnectionTestResponse {
+        let started = Instant::now();
+        let config = match self.current_config().await {
+            Ok(config) => config,
+            Err(error) => {
+                return connection_test_failure(started, error.message);
+            }
+        };
+        if request.provider != "openai-compatible" {
+            return connection_test_failure(
+                started,
+                format!("unsupported provider `{}`", request.provider),
+            );
+        }
+        let credential_env = request
+            .credential_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(config.model.api_key_env);
+        if !valid_environment_name(&credential_env) {
+            return connection_test_failure(
+                started,
+                "credential reference must be an environment variable name",
+            );
+        }
+        let Ok(key) = std::env::var(&credential_env) else {
+            return connection_test_failure(
+                started,
+                format!("environment variable `{credential_env}` is not configured"),
+            );
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return connection_test_failure(
+                started,
+                format!("environment variable `{credential_env}` is empty"),
+            );
+        }
+        let endpoint = request.endpoint.trim().trim_end_matches('/');
+        if endpoint.is_empty() {
+            return connection_test_failure(started, "endpoint cannot be empty");
+        }
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => return connection_test_failure(started, error.to_string()),
+        };
+        let response = match client
+            .get(format!("{endpoint}/models"))
+            .bearer_auth(key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return connection_test_failure(started, error.to_string()),
+        };
+        if !response.status().is_success() {
+            return connection_test_failure(
+                started,
+                format!("model endpoint returned HTTP {}", response.status()),
+            );
+        }
+        let value: serde_json::Value = match response.json().await {
+            Ok(value) => value,
+            Err(error) => {
+                return connection_test_failure(
+                    started,
+                    format!("model endpoint returned invalid JSON: {error}"),
+                );
+            }
+        };
+        let models = value
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        let requested_model = request.model.trim();
+        let selected_model = models
+            .iter()
+            .copied()
+            .find(|model| *model == requested_model)
+            .or_else(|| models.first().copied());
+        let exact_model_available = requested_model.is_empty() || models.contains(&requested_model);
+        ConnectionTestResponse {
+            ok: exact_model_available && selected_model.is_some(),
+            model: selected_model.map(str::to_owned),
+            latency_ms: elapsed_millis(started),
+            message: if selected_model.is_none() {
+                "connected, but the endpoint returned no models".to_owned()
+            } else if exact_model_available {
+                format!(
+                    "connected; model `{}` is available",
+                    selected_model.unwrap_or_default()
+                )
+            } else {
+                format!("connected, but model `{requested_model}` is not listed")
+            },
+        }
+    }
+
+    fn artifacts_for_session(
+        &self,
+        detail: &super::SessionDetail,
+    ) -> Result<Vec<ResolvedArtifact>, AppErrorView> {
+        let mut references = BTreeMap::<PathBuf, ArtifactRef>::new();
+        for action in &detail.actions {
+            if let Some(result) = &action.result {
+                insert_artifact_ref(&mut references, result.stdout_artifact.as_ref());
+                insert_artifact_ref(&mut references, result.stderr_artifact.as_ref());
+            }
+        }
+        for trial in &detail.trials {
+            for attempt in &trial.repetitions {
+                for result in &attempt.actions {
+                    insert_artifact_ref(&mut references, result.stdout_artifact.as_ref());
+                    insert_artifact_ref(&mut references, result.stderr_artifact.as_ref());
+                }
+                if let Some(oracle) = &attempt.oracle {
+                    insert_artifact_ref(&mut references, oracle.stdout_artifact.as_ref());
+                    insert_artifact_ref(&mut references, oracle.stderr_artifact.as_ref());
+                }
+            }
+        }
+        let Some(session_root) = detail.session.baseline_path.parent() else {
+            return Err(invariant_error());
+        };
+        let canonical_root = fs::canonicalize(session_root).map_err(|error| {
+            AppErrorView::new(
+                ErrorCode::Internal,
+                format!("cannot inspect session artifact root: {error}"),
+            )
+        })?;
+        let mut artifacts = Vec::new();
+        for reference in references.into_values() {
+            if !safe_artifact_relative_path(&reference.path) {
+                continue;
+            }
+            let path = session_root.join(&reference.path);
+            let Ok(canonical_path) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !canonical_path.starts_with(&canonical_root) || !canonical_path.is_file() {
+                continue;
+            }
+            let metadata = fs::metadata(&canonical_path).map_err(|error| {
+                AppErrorView::new(
+                    ErrorCode::Internal,
+                    format!("cannot inspect artifact metadata: {error}"),
+                )
+            })?;
+            let created_at = metadata
+                .modified()
+                .map(chrono::DateTime::<Utc>::from)
+                .unwrap_or(detail.session.updated_at);
+            let name = reference
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("artifact")
+                .to_owned();
+            artifacts.push(ResolvedArtifact {
+                summary: ArtifactSummary {
+                    id: artifact_id(detail.session.id, &reference.path),
+                    session_id: detail.session.id,
+                    name,
+                    media_type: "text/plain; charset=utf-8".to_owned(),
+                    size: metadata.len(),
+                    sha256: reference.sha256,
+                    created_at,
+                },
+                path: canonical_path,
+            });
+        }
+        artifacts.sort_by(|left, right| left.summary.name.cmp(&right.summary.name));
+        Ok(artifacts)
+    }
+
+    async fn find_artifact(&self, artifact_id: Uuid) -> Result<ResolvedArtifact, AppErrorView> {
+        let AppResponse::Sessions { sessions } = self
+            .execute(AppCommand::ListSessions)
+            .await
+            .map_err(app_error_view)?
+        else {
+            return Err(invariant_error());
+        };
+        for session in sessions {
+            let detail = self.session_detail(session.id).await?;
+            if let Some(artifact) = self
+                .artifacts_for_session(&detail)?
+                .into_iter()
+                .find(|artifact| artifact.summary.id == artifact_id)
+            {
+                return Ok(artifact);
+            }
+        }
+        Err(AppErrorView::new(ErrorCode::NotFound, "artifact not found"))
     }
 
     fn protocol_session_summary(
@@ -1138,16 +1391,80 @@ fn paginate<T>(
     ))
 }
 
+#[derive(Debug)]
+struct ResolvedArtifact {
+    summary: ArtifactSummary,
+    path: PathBuf,
+}
+
+fn insert_artifact_ref(
+    artifacts: &mut BTreeMap<PathBuf, ArtifactRef>,
+    reference: Option<&ArtifactRef>,
+) {
+    if let Some(reference) = reference {
+        artifacts
+            .entry(reference.path.clone())
+            .or_insert_with(|| reference.clone());
+    }
+}
+
+fn safe_artifact_relative_path(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::Normal(first)) if first == "artifacts")
+        && components.all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn artifact_id(session_id: Uuid, path: &Path) -> Uuid {
+    let mut digest = Sha256::new();
+    digest.update(session_id.as_bytes());
+    digest.update([0]);
+    digest.update(path.as_os_str().as_encoded_bytes());
+    let digest = digest.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn connection_test_failure(started: Instant, message: impl Into<String>) -> ConnectionTestResponse {
+    ConnectionTestResponse {
+        ok: false,
+        model: None,
+        latency_ms: elapsed_millis(started),
+        message: message.into(),
+    }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 fn public_config(config: &FixTraceConfig) -> PublicConfigSummary {
     PublicConfigSummary {
         provider: config.model.provider.clone(),
         endpoint: config.model.endpoint.clone(),
+        api_key_env: config.model.api_key_env.clone(),
         model: config.model.model.clone(),
         api_style: config.model.api_style.clone(),
         context_length: config.model.context_length,
         reasoning_mode: config.model.reasoning_mode.clone(),
+        max_agent_steps: u64::try_from(config.model.max_agent_steps).unwrap_or(u64::MAX),
+        input_per_million_usd: config.pricing.input_per_million_usd,
+        output_per_million_usd: config.pricing.output_per_million_usd,
+        max_total_tokens: config.budget.max_total_tokens,
+        max_cost_usd: config.budget.max_cost_usd,
         replay_repetitions: config.replay.repetitions,
         oracle_timeout_secs: config.replay.oracle_timeout_secs,
+        include_target: config.replay.include_target,
         has_api_key: std::env::var(&config.model.api_key_env)
             .is_ok_and(|value| !value.trim().is_empty()),
         approval_policy: config.approval.policy.clone(),

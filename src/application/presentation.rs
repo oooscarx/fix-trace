@@ -25,6 +25,7 @@ pub(super) fn session_summary(session: &SessionRecord) -> fixtrace_protocol::Ses
     present_session_summary(SessionSummaryInput {
         id: session.id,
         project_name: session.project_name.clone(),
+        project_path: session.original_project.display().to_string(),
         status: match session.status {
             SessionStatus::Recording => SourceSessionStatus::Recording,
             SessionStatus::ReadyForAnalysis => SourceSessionStatus::ReadyForAnalysis,
@@ -59,6 +60,7 @@ pub(super) fn action_view(action: &Action) -> ActionView {
             format!("Change directory to /{}", path.display()),
         ),
     };
+    let access = crate::minimize::dependency::infer_resources(action);
     present_action(ActionPresentationInput {
         id: action.id,
         original_order: action.original_order,
@@ -70,8 +72,19 @@ pub(super) fn action_view(action: &Action) -> ActionView {
         },
         summary,
         replayable: action.replayable,
+        reads: access.reads.iter().map(resource_label).collect(),
+        writes: access.writes.iter().map(resource_label).collect(),
+        resource_access_opaque: access.opaque,
         note: action.note.clone(),
     })
+}
+
+fn resource_label(resource: &crate::minimize::dependency::Resource) -> String {
+    match resource {
+        crate::minimize::dependency::Resource::File(path) => path.display().to_string(),
+        crate::minimize::dependency::Resource::EnvironmentVariable(key) => format!("env:{key}"),
+        crate::minimize::dependency::Resource::WorkingDirectory => "cwd".to_owned(),
+    }
 }
 
 pub(super) fn trial_view(trial: &Trial) -> TrialView {

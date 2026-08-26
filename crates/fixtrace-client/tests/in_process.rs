@@ -1,13 +1,14 @@
 use std::{fs, sync::Arc, time::Duration};
 
+use base64::Engine as _;
 use fixtrace::application::{AppServiceOptions, FixTraceAppService, FixTraceApplication};
 use fixtrace_client::{AppClient, ClientError, InProcessClient};
 use fixtrace_protocol::{
-    AppEvent, AppRequest, AppResponsePayload, ClientCapabilities, ConfigEntryUpdate,
-    ConfigUpdateRequest, ConfigValue, InitializeRequest, PROTOCOL_VERSION, PageRequest,
-    SessionCreateRequest, SessionForkRequest, SessionIdRequest, SessionSnapshotRequest,
-    SubscribeRequest, TaskIdRequest, TaskInput, TaskStartRequest, TaskStatus, TrialRepeatRequest,
-    TrialRunRequest,
+    AppEvent, AppRequest, AppResponsePayload, ArtifactReadRequest, ClientCapabilities,
+    ConfigEntryUpdate, ConfigUpdateRequest, ConfigValue, ConnectionTestRequest, InitializeRequest,
+    PROTOCOL_VERSION, PageRequest, SessionCreateRequest, SessionForkRequest, SessionIdRequest,
+    SessionPageRequest, SessionSnapshotRequest, SubscribeRequest, TaskIdRequest, TaskInput,
+    TaskStartRequest, TaskStatus, TrialRepeatRequest, TrialRunRequest,
 };
 use tempfile::tempdir;
 use tokio::time::{Instant, timeout};
@@ -283,6 +284,130 @@ async fn in_process_client_supports_complete_session_and_trial_workflow() {
     assert!(matches!(
         archived,
         AppResponsePayload::Session(ref session) if session.archived
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn in_process_client_lists_and_reads_bounded_output_artifacts() {
+    let temp = tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("fixture.txt"), "broken\n").unwrap();
+    let service = Arc::new(
+        FixTraceAppService::start(
+            AppServiceOptions {
+                state_dir: Some(temp.path().join("state")),
+                config_path: None,
+                initialize_event_store: true,
+            },
+            CancellationToken::new(),
+        )
+        .unwrap(),
+    );
+    let client = InProcessClient::new(service);
+    client.initialize(initialize_request()).await.unwrap();
+
+    let created = client
+        .request(AppRequest::SessionCreate(SessionCreateRequest {
+            project,
+            oracle: "false".to_owned(),
+            title: Some("artifact session".to_owned()),
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Session(session) = created else {
+        panic!("session/create returned the wrong response");
+    };
+    let recorded = client
+        .request(AppRequest::TaskStart(TaskStartRequest {
+            session_id: Some(session.id),
+            input: TaskInput::RecordTrace {
+                line: "yes x | head -c 70000".to_owned(),
+            },
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Task(recorded) = recorded else {
+        panic!("record task returned the wrong response");
+    };
+    wait_for_task(&client, recorded.id, TaskStatus::Completed).await;
+
+    let listed = client
+        .request(AppRequest::ArtifactList(SessionPageRequest {
+            session_id: session.id,
+            page: PageRequest {
+                cursor: None,
+                limit: Some(10),
+            },
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::ArtifactList { artifacts, page } = listed else {
+        panic!("artifact/list returned the wrong response");
+    };
+    assert_eq!(artifacts.len(), 1);
+    assert!(!page.has_more);
+    assert_eq!(artifacts[0].size, 70_000);
+    assert!(artifacts[0].name.ends_with("stdout.txt"));
+
+    let chunk = client
+        .request(AppRequest::ArtifactRead(ArtifactReadRequest {
+            artifact_id: artifacts[0].id,
+            offset: 1_024,
+            limit: 4_096,
+        }))
+        .await
+        .unwrap();
+    let AppResponsePayload::Artifact(chunk) = chunk else {
+        panic!("artifact/read returned the wrong response");
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(chunk.bytes_base64)
+        .unwrap();
+    assert_eq!(bytes.len(), 4_096);
+    assert!(
+        bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte == if index % 2 == 0 { b'x' } else { b'\n' })
+    );
+    assert_eq!(chunk.offset, 1_024);
+    assert_eq!(chunk.next_offset, 5_120);
+    assert!(!chunk.eof);
+    assert_eq!(chunk.sha256, artifacts[0].sha256);
+}
+
+#[tokio::test]
+async fn connection_test_requires_an_environment_credential_reference() {
+    let temp = tempdir().unwrap();
+    let service = Arc::new(
+        FixTraceAppService::start(
+            AppServiceOptions {
+                state_dir: Some(temp.path().join("state")),
+                config_path: None,
+                initialize_event_store: true,
+            },
+            CancellationToken::new(),
+        )
+        .unwrap(),
+    );
+    let client = InProcessClient::new(service);
+    client.initialize(initialize_request()).await.unwrap();
+
+    let response = client
+        .request(AppRequest::ConfigTestConnection(ConnectionTestRequest {
+            provider: "openai-compatible".to_owned(),
+            endpoint: "https://example.invalid/v1".to_owned(),
+            model: "test-model".to_owned(),
+            credential_id: Some("FIXTRACE_TEST_CREDENTIAL_MUST_NOT_EXIST_7E3C".to_owned()),
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        response,
+        AppResponsePayload::ConnectionTest(ref result)
+            if !result.ok && result.message.contains("is not configured")
     ));
 }
 

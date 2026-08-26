@@ -20,5 +20,6 @@ fixtrace-protocol = { path = "../../../crates/fixtrace-protocol" }
 fixtrace-server = { path = "../../fixtrace-server" }
 serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.7.2"
 tokio = { version = "1.47", features = ["macros", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }

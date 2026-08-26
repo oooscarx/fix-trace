@@ -21,6 +21,8 @@ pub enum SessionStatusView {
 pub struct SessionSummary {
     pub id: Uuid,
     pub project_name: String,
+    #[serde(default)]
+    pub project_path: String,
     pub status: SessionStatusView,
     pub active_task_id: Option<Uuid>,
     pub parent_session_id: Option<Uuid>,
@@ -38,6 +40,12 @@ pub struct ActionView {
     pub summary: String,
     pub replayable: bool,
     pub can_rerun: bool,
+    #[serde(default)]
+    pub reads: Vec<String>,
+    #[serde(default)]
+    pub writes: Vec<String>,
+    #[serde(default)]
+    pub resource_access_opaque: bool,
     pub note: Option<String>,
 }
 
